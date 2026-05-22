@@ -1,0 +1,201 @@
+\section{Wallet Layer}
+\label{sec:wallet}
+
+The wallet layer is the user-facing surface of TARDUS. It holds the user's coin collection in encrypted local storage, orchestrates the off-chain protocols of \Cref{sec:mint-blindsig,sec:refresh} on behalf of the user, encodes payment requests as URIs, communicates with the encrypted relay mesh, and prepares on-chain transactions for the user's signature. This section specifies the wallet's data model, the invoice scheme, the backup and recovery procedures, the multi-device synchronisation discipline, and the hardware-wallet integration roadmap.
+
+\subsection{Coin Storage}
+\label{sec:wallet-coin-storage}
+
+A wallet maintains a \emph{coin store}: an append-and-burn collection of $(x_i, Cp_i, \sigma_i, \mathsf{denom}_i)$ tuples, with a per-coin marker indicating whether the coin is spent (added to a nullifier on-chain), in-flight (currently the subject of a pending refresh or withdrawal), or active (spendable).
+
+The store is held in encrypted local storage at all times. The encryption key is derived from the user's master secret (\Cref{sec:wallet-backup}). The encryption primitive is \texttt{ChaCha20-Poly1305} AEAD~\cite{nist-sp800-185}, with a 32-byte key, a 12-byte nonce per ciphertext, and an additional-data field carrying the wallet's protocol version and the user-chosen wallet identifier.
+
+\subsection{Encrypted Backup and Recovery}
+\label{sec:wallet-backup}
+
+\paragraph{Backup format.} A backup is a single sealed blob:
+\[
+  \mathsf{Backup} = \mathsf{AEAD\text{-}Seal}(\mathsf{key} = \mathsf{HKDF}(\mathsf{master\_seed}, \text{``TARDUS-wallet-backup-v1''}), \mathsf{nonce}, \mathsf{aad}, \mathsf{plaintext})
+\]
+where $\mathsf{plaintext}$ is the borsh-encoded serialised coin store plus wallet metadata (version, creation timestamp, user-chosen label). The $\mathsf{master\_seed}$ is derived from a BIP-39 mnemonic (\Cref{sec:wallet-mnemonic}).
+
+\paragraph{Persistent file format (v3.4).} The wallet ships with a
+\texttt{WalletDb} struct that holds the coin store on disk at
+\texttt{<data\_dir>/wallet.bin}. The wire format is the same
+\texttt{Backup} blob above; the only addition is atomic write
+discipline (temp file + rename) so a crash mid-write cannot leave a
+half-truncated wallet file. The persistent format includes
+\texttt{CoinStatus} (Active / InFlight / Spent) per stored coin, used
+by the wallet UI for balance display and the refresh flow.
+
+\paragraph{Multi-keyset metadata (v3.6).} A second AEAD file
+\texttt{<data\_dir>/keysets.bin} holds a
+\texttt{BTreeMap<\text{name}, KeysetInfo>} where each entry stores
+\texttt{joint\_pk\_hex}, \texttt{denom},
+\texttt{validators: Vec<URL>}, and optional CA / client cert paths
+for TLS / mTLS communication. The same wallet seed encrypts both
+files; the wallet UI lets the user issue or refresh against a named
+keyset (\texttt{tardus-wallet issue --keyset mainnet}) without
+re-typing validator URLs or joint pubkeys.
+
+\subsection{Mnemonic Key Management}
+\label{sec:wallet-mnemonic}
+
+The wallet's $\mathsf{master\_seed}$ is derived from a BIP-39
+mnemonic phrase~\cite{bip39}:
+
+\begin{enumerate}[leftmargin=2em,itemsep=0pt]
+  \item User generates a fresh 12- or 24-word phrase from
+        $\mathsf{OsRng}$.
+  \item PBKDF2-HMAC-SHA-512(mnemonic, optional passphrase, 2048 iterations)
+        outputs 64 bytes.
+  \item The wallet takes the \emph{first 32 bytes} as
+        $\mathsf{master\_seed}$. The remaining 32 bytes are intentionally
+        discarded; the wallet does not use BIP-32 hardened derivation
+        paths because each coin's per-coin secret is derived via
+        per-coin HKDF (\Cref{sec:refresh-derivation}) rather than via
+        a deterministic tree.
+\end{enumerate}
+
+The BIP-39 test vector \texttt{"abandon abandon ... about"} with no
+passphrase yields a \texttt{master\_seed} prefix
+\texttt{5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc1};
+the wallet's unit tests pin this vector for regression protection.
+
+\subsection{Receiving Identity}
+\label{sec:wallet-recv-identity}
+
+For peer-to-peer payment delivery (\Cref{sec:relay}), a recipient
+publishes a long-lived \emph{receiving identity} public key,
+deterministically derived from $\mathsf{master\_seed}$:
+\[
+  \mathsf{recv\_sk} = \mathsf{HKDF\text{-}SHA\text{-}512}(\,\mathsf{salt}=\text{``TARDUS-recv-id-v1''},\,
+                                                          \mathsf{ikm}=\mathsf{master\_seed},\,
+                                                          \mathsf{info}=\text{``ed25519-keypair''}\,)\bmod \ell,
+\]
+$\mathsf{recv\_pk} = \mathsf{recv\_sk} \cdot G$. The pubkey is shared
+with senders via the \texttt{recipient\_pubkey} field of the invoice
+URI; the senders encrypt their coin-transfer payload to
+$\mathsf{recv\_pk}$ via the sealed-box construction of
+\Cref{sec:relay-payload}. The wallet never re-derives or rotates
+$\mathsf{recv\_sk}$; recovery is full as long as the mnemonic is
+available.
+
+\paragraph{Why deterministic.} Recipients are typically off-line at the
+moment of receipt; the relay holds the ciphertext until the recipient
+polls. If the recipient's wallet could not re-derive
+$\mathsf{recv\_sk}$ from the mnemonic alone, lost wallet devices would
+lose every coin in flight at the moment of loss. The HKDF derivation
+above costs $O(1)$ at boot and is bit-equivalent across devices.
+
+\paragraph{Why separated from per-coin secrets.} The receiving
+identity is a long-lived address; per-coin secrets are one-shot. Mixing
+them via a single derivation tree (e.g.\ BIP-32) would let a sender who
+sees one coin secret retroactively de-anonymise the recipient's other
+addresses. The receiving identity therefore lives in its own
+single-purpose HKDF context (salt = \texttt{"TARDUS-recv-id-v1"}),
+disjoint from coin-secret derivation.
+
+\paragraph{Recovery.} On a fresh device, the user enters the BIP-39 mnemonic; the wallet reconstructs $\mathsf{master\_seed}$, retrieves the latest backup (from the cloud or local copy), and decrypts the coin store. Coins recovered this way are unchanged: they have not been spent on-chain (since the coin store has not been re-used), so they retain their full value. \emph{Caveat:} backups are point-in-time snapshots. Coins minted or refreshed between the last backup and a device loss are unrecoverable. The wallet MUST trigger an incremental backup after every refresh.
+
+\paragraph{Coin recovery is NOT deterministic regeneration.} Per the Cashu NUT-13 lesson (\texttt{research/PRODUCTION\_LESSONS.md} §L2), coin secrets are derived from per-coin one-shot HKDF seeds (\Cref{sec:refresh-derivation}), not from the wallet's master seed via BIP-32. A lost wallet whose backup is also lost is permanently unrecoverable; this trade-off is the price of soundness against keyset-collision attacks.
+
+\subsection{Invoice URI Scheme}
+\label{sec:wallet-invoice}
+
+The TARDUS invoice URI captures all data needed for a payer to send funds to a recipient. The scheme is:
+\[
+  \texttt{tardus://}\langle\mathit{recipient\_pubkey}\rangle\texttt{?denom=}\langle d\rangle\texttt{\&relay=}\langle\mathit{relay\_url}\rangle\texttt{\&memo=}\langle\mathit{base64}\rangle
+\]
+with:
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item $\mathit{recipient\_pubkey}$: $32$-byte recipient identity, hex-encoded.
+  \item $\mathit{denom}$: requested amount in lamports.
+  \item $\mathit{relay\_url}$: URL of an encrypted relay (\Cref{sec:wallet-relay}) the recipient is listening on. May appear multiple times.
+  \item $\mathit{memo}$ (optional): base64-encoded free-form message, $\leq 128$ bytes after decoding.
+\end{itemize}
+
+The URI is presentable as a QR code, hyperlink, or NFC tag. Parsers MUST reject malformed URIs (wrong scheme, missing required parameters, exceeding length bounds).
+
+\subsection{Refresh Session Persistence}
+\label{sec:wallet-refresh-persistence}
+
+The user-side state across the six-round refresh protocol (\Cref{sec:refresh-rounds}) is held in a \texttt{RefreshSession} record. Between Round 2 (submission of $\{c_\gamma\}$) and Round 6 (unblinding), the wallet MUST persist this record to encrypted local storage on every state transition, so a device crash between rounds does not strand the user with a coin marked in-flight but no recovery path.
+
+The record is borsh-encoded and AEAD-sealed with the same key as the coin store. After Round 6 succeeds (the new coin is constructed), the session record is deleted and the new coin is committed to the coin store.
+
+\subsection{Multi-Device Synchronisation}
+\label{sec:wallet-multi-device}
+
+Multi-device support is deferred to v1.5.2. The intended design uses a CRDT-based replicated coin store:
+
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item Coin additions: G-Set of $Cp$ entries (monotonic merge).
+  \item Coin spends: LWW-Register per $Cp$ with timestamp = epoch + slot of the spend transaction.
+\end{itemize}
+
+Cross-device synchronisation rides over the same encrypted relay mesh used for invoice payment delivery, with each device having its own relay handle.
+
+\subsection{Relay Communication}
+\label{sec:wallet-relay}
+
+The wallet's user-to-user delivery path runs through the relay layer
+specified in full in \Cref{sec:relay}. From the wallet's perspective,
+the protocol is two commands:
+
+\begin{enumerate}[leftmargin=2em,itemsep=0pt]
+  \item \textbf{Send.} \texttt{tardus-wallet pay --invoice <uri> --keyset
+        <name> [--encrypt]}: the wallet mints a fresh coin under the
+        named keyset, JSON-encodes the coin material, optionally seals
+        it to the invoice's recipient pubkey via the
+        \Cref{sec:relay-payload} sealed-box construction, and
+        \texttt{POST}s the resulting hex payload to the relay
+        identified in the invoice URI.
+  \item \textbf{Receive.} \texttt{tardus-wallet receive --relay <url>
+        --recipient-pubkey <hex>}: the wallet polls the relay for
+        messages addressed to the recipient pubkey, tries to
+        \texttt{sealed\_box::open} each payload with the
+        mnemonic-derived $\mathsf{recv\_sk}$ (with a graceful
+        fallback to plain JSON for v5.3 senders), reconstructs the
+        coin, adds it to the coin store, and (unless
+        \texttt{--keep-on-relay} is set) deletes the message from the
+        relay.
+\end{enumerate}
+
+Multiple relays may be used in parallel for redundancy; the wallet
+polls each independently. The relay's TLS, persistence, and failure
+semantics are specified in \Cref{sec:relay}.
+
+\subsection{Hardware-Wallet Roadmap}
+\label{sec:wallet-hw}
+
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item \textbf{Phase 3 shipped (v3 wallet):} software-only wallets.
+        The mnemonic is held by the user (offline backup); the wallet
+        process holds the derived master seed only during the
+        function call that needs it (\texttt{Zeroizing} wrapper, dropped
+        at scope exit). \texttt{wallet.bin} + \texttt{keysets.bin} are
+        AEAD-sealed under HKDF-derived keys.
+  \item \textbf{Phase 4 (planned):} Tangem and Trezor support via
+        custom apps (blind Schnorr signing implemented on the hardware
+        device). YubiKey 5 with FIDO2 for Ed25519 signing operations
+        on the receiving identity.
+  \item \textbf{Phase 5 (planned):} Ledger Nano support, contingent on
+        Ledger firmware acceptance of TARDUS blind-Schnorr signing.
+        Sealed-box decryption may remain on the host (X25519 not
+        always available on HW wallets); the recipient's secret key
+        is then derived per-call and zeroised, accepting a smaller
+        attack surface than long-lived in-process key residency.
+\end{itemize}
+
+\subsection{Security Considerations}
+\label{sec:wallet-security}
+
+The wallet is the user's trust anchor. Compromise of the wallet master seed compromises all coins held in that wallet. The wallet MUST:
+
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item Never log, print, or otherwise expose secret material (coin secrets, refresh session blinding factors, master seed).
+  \item Verify every received coin against the on-chain keyset registry's current $\mathsf{joint\_pk}$ for the claimed denomination before accepting it into the coin store.
+  \item Detect and reject double-receipt: the same coin received twice (via two different relays, say) must merge to a single entry rather than appear twice.
+  \item Enforce per-coin spend marking atomically across persistence operations.
+\end{itemize}

@@ -1,0 +1,407 @@
+\section{Threshold Mint Protocol}
+\label{sec:mint}
+
+The TARDUS mint is a $t$-of-$n$ threshold service that issues blind Schnorr signatures (\Cref{con:blind-threshold}) under a jointly-held key. No single operator can either forge a signature, learn the message being issued, or unilaterally revoke a denomination. This section specifies the committee topology, the distributed key generation ceremony, the threshold blind signing protocol, denomination key rotation, and the revoke/recoup paths.
+
+\subsection{Committee Topology}
+\label{sec:mint-topology}
+
+The canonical TARDUS v1 committee is fixed at $n = 30$ validators with threshold $t = 14$. This choice reflects three operational constraints derived from production lessons (see \texttt{research/PRODUCTION\_LESSONS.md}):
+
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item \textbf{Liveness margin.} With $n - t + 1 = 17$ validators required online for signing, the system tolerates up to $13$ simultaneous offline validators. At an operational availability of $99\%$ per validator, the probability that more than $13$ are simultaneously offline is $< 2^{-30}$, well below any realistic outage scenario.
+  \item \textbf{Forgery resistance.} Forging a signature requires corrupting at least $14$ validators. Under independent compromise probability $p$ per validator, the joint compromise probability is bounded by $\binom{30}{14} p^{14} \approx 1.45 \times 10^8 \cdot p^{14}$; for $p \leq 10^{-3}$ this gives $\leq 2^{-12}$ per epoch.
+  \item \textbf{Communication cost.} Each DKG and signing round produces $\mathcal{O}(n^2)$ point-to-point messages in the pessimistic case. At $n = 30$ this is $900$ messages per round, well within practical operational bounds.
+\end{itemize}
+
+\subsection{Three-Tier Key Architecture}
+\label{sec:mint-keyarch}
+
+Each validator $V_i$ holds three distinct cryptographic identities, separated by hardware and process boundary:
+
+\begin{description}[leftmargin=1.5em,style=nextline,itemsep=0.3em]
+  \item[Tier 1 --- Offline Master Identity Key (MIK)] A long-term Ed25519 keypair, generated once on an air-gapped device and stored exclusively in an offline HSM. The MIK signs (a) the validator's enrolment certificate, (b) all ceremony transcripts, and (c) the validator's Tier 2 keys with limited validity. The MIK never participates in online operations.
+  \item[Tier 2 --- Online Threshold Helper (OTH)] An Ed25519 keypair issued by Tier 1, with a validity period of at most $90$ epochs. The OTH holds the validator's share $sk_i$ of the joint mint key inside an online FIPS 140-2 Level 3 HSM. All threshold signing operations are gated through the OTH and physically executed inside the HSM.
+  \item[Tier 3 --- Public API Endpoint (PAE)] A network-facing daemon that receives user requests (blind issuance, refresh, recoup) and forwards them to Tier 2 via authenticated UNIX domain sockets. The PAE holds no secret key material; compromise of the PAE limits the attacker to denial of service for the duration of control.
+\end{description}
+
+The architecture mirrors the GNU Taler exchange's three-tier separation (\cite{taler-exchange-manual}) but elevates Tier 2 with mandatory HSM custody, addressing the gap noted in the Taler manual itself (``does not yet support the use of a hardware security module'').
+
+\subsection{Hardware Security Module Requirements}
+\label{sec:mint-hsm}
+
+Each validator's Tier 2 HSM must satisfy the following requirements:
+
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item Certified to FIPS 140-2 Level 3~\cite{fips140-2} or equivalent (Common Criteria EAL 4+).
+  \item Native support for Ed25519 / edwards25519 scalar multiplication and signature operations.
+  \item Capacity for at least $200$ key handles (to accommodate $LOOKAHEAD = 30$ epochs of pre-generated share material with rotation overlap).
+  \item Tamper-evident enclosure with audit logging of all key operations.
+  \item Cryptographically authenticated firmware (vendor-signed updates only).
+\end{itemize}
+
+Reference implementations targeting YubiHSM 2, Thales Luna T-Series, and AWS CloudHSM are produced in Phase 2 (see \texttt{research/PRODUCTION\_LESSONS.md} §L7).
+
+\subsection{Distributed Key Generation Ceremony}
+\label{sec:mint-dkg}
+
+The DKG ceremony bootstraps the joint mint key. It follows~\cite{gennaro-jarecki-krawczyk-rabin1999} with the round optimisation of~\cite{komlo-goldberg2020}, instantiated over \texttt{edwards25519} using the primitives of~\Cref{sec:primitives}.
+
+\subsubsection{Ceremony Identifier}
+\label{sec:mint-ceremony-id}
+
+Each ceremony is parameterised by a $128$-bit \emph{ceremony identifier}
+\[
+  \mathsf{ceremony\_id} \in \{0,1\}^{128},
+\]
+generated as $\mathsf{ceremony\_id} = \mathsf{HKDF}(\mathsf{epoch} \,\|\, \mathsf{nonce})$ where $\mathsf{nonce}$ is $64$ bits of fresh randomness sampled jointly via verifiable random function output during ceremony initialisation. The identifier is a domain separator that binds every signed message in the ceremony to a unique session, preventing cross-ceremony replay.
+
+\subsubsection{Round 1 --- Pedersen VSS Share Distribution}
+\label{sec:mint-dkg-r1}
+
+Each validator $V_i$, for $i \in [n]$, acts as a Pedersen-VSS dealer per~\Cref{con:vss}:
+
+\begin{enumerate}[leftmargin=2em,itemsep=0.2em]
+  \item $V_i$ samples a fresh polynomial $f_i(x) = s_i + a_{i,1} x + \cdots + a_{i,t-1} x^{t-1}$ over $\mathbb{F}_\ell$, with $s_i$ being the validator's contribution to the joint secret.
+  \item $V_i$ samples a fresh blinding polynomial $g_i(x) = r_i + b_{i,1} x + \cdots + b_{i,t-1} x^{t-1}$.
+  \item $V_i$ publishes both Pedersen commitments $C_{i,k} = a_{i,k} G + b_{i,k} H$ and Feldman commitments $A_{i,k} = a_{i,k} G$ for $k = 0, \ldots, t-1$ (with $a_{i,0} = s_i$, $b_{i,0} = r_i$). Here $H$ is an independent generator with unknown discrete logarithm relative to $G$, derived as $H = \mathsf{hash\_to\_point}(\text{``TARDUS-pedersen-H-v1''})$. The Pedersen set is used for share verification (statistical hiding of intermediate state); the Feldman set is used for joint-key derivation (\Cref{sec:mint-dkg-r3}) and as the public key against which the proof of knowledge is verified.
+  \item $V_i$ broadcasts a Schnorr proof of knowledge $\pi_i$ of $s_i$ against the Feldman secret commitment $A_{i,0} = s_i G$.
+  \item $V_i$ privately sends to each validator $V_j$ (for $j \neq i$) the shares $\sigma_{i \to j} = (f_i(j), g_i(j))$ over an authenticated, encrypted channel (Tier 1 MIK key-derived).
+\end{enumerate}
+
+Each validator $V_j$ verifies received shares by checking
+\[
+  f_i(j) \cdot G + g_i(j) \cdot H \stackrel{?}{=} \sum_{k=0}^{t-1} j^k \cdot C_{i,k}
+\]
+and verifies $\pi_i$ as a standard Schnorr signature (\Cref{con:schnorr}) over the implicit message $\mathsf{ceremony\_id} \,\|\, i$. Any failed verification opens a complaint in Round 2.
+
+\subsubsection{Round 2 --- Complaint Phase}
+\label{sec:mint-dkg-r2}
+
+Validators with verification failures broadcast complaints of the form $(\mathsf{ceremony\_id}, V_j, V_i, \mathsf{evidence})$ where $V_j$ accuses $V_i$ of providing an invalid share. The accused validator $V_i$ must respond within the round 2 window by either:
+
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item Revealing the share $\sigma_{i \to j}$ publicly (which the complainant or any party can verify against $V_i$'s commitments), or
+  \item Failing to respond, in which case $V_i$ is removed from the qualified set $\mathsf{QUAL}$.
+\end{itemize}
+
+Public reveal of a share does not compromise security, because the underlying VSS commitments remain statistically hiding for any set of $< t$ revealed shares. The qualified set $\mathsf{QUAL} \subseteq [n]$ contains exactly the validators that survive Round 2.
+
+\subsubsection{Round 3 --- Finalisation}
+\label{sec:mint-dkg-r3}
+
+The joint public key is computed deterministically from $\mathsf{QUAL}$ via the Feldman commitments:
+\[
+  PK = \sum_{i \in \mathsf{QUAL}} A_{i, 0} = \Bigl( \sum_{i \in \mathsf{QUAL}} s_i \Bigr) G.
+\]
+The Pedersen commitments $C_{i,0} = s_i G + r_i H$ are not used here, because their additive blinding component $\sum_i r_i H$ would obscure the joint key.
+
+Each validator $V_j$ derives its share of the joint secret as
+\[
+  sk_j = \sum_{i \in \mathsf{QUAL}} f_i(j),
+\]
+which is stored inside the validator's Tier 2 HSM. The validator's auxiliary blinding share $\sum_{i \in \mathsf{QUAL}} g_i(j)$ is similarly retained.
+
+For the ceremony to succeed, $|\mathsf{QUAL}| \geq t$ is required; otherwise the ceremony aborts and a new ceremony is initiated with a fresh $\mathsf{ceremony\_id}$.
+
+\subsubsection{Transcript Authentication}
+\label{sec:mint-dkg-transcript}
+
+The full ceremony transcript $\mathcal{T}$ is the concatenation of all broadcast messages from Rounds 1--3, ordered canonically. The transcript hash is
+\[
+  \tau = \mathsf{SHA\text{-}256}(\mathsf{ceremony\_id} \,\|\, \mathsf{epoch} \,\|\, \mathcal{T}).
+\]
+Each validator $V_i$ in $\mathsf{QUAL}$ publishes a \emph{transcript signature}
+\[
+  \mathsf{TranscriptSignature}_i = \mathsf{Sign}(\mathsf{MIK}_i, \text{``tardus-ceremony-v1''} \,\|\, \tau)
+\]
+using its Tier 1 offline master key. The domain separator string distinguishes transcript signatures from all other signature usages in the protocol; the construction is a Schnorr signature over the prefixed message per~\Cref{con:schnorr}.
+
+A ceremony is \emph{ratified} once at least $t$ valid transcript signatures from members of $\mathsf{QUAL}$ have been published on a canonical record (the on-chain ceremony registry, \Cref{sec:onchain}).
+
+\subsection{Keyset Identifier Derivation}
+\label{sec:mint-keysetid}
+
+The mint operates a family of denomination keys; each denomination $d$ in the set of supported values $\mathcal{D} = \{2^0, 2^1, \ldots, 2^{32}\}$ lamports has its own joint key $PK_d$ produced by a separate DKG ceremony. The keyset identifier per~\Cref{sec:hash} and \texttt{research/PRODUCTION\_LESSONS.md} §L3 is
+\[
+  \mathsf{KeysetID}_d = \mathtt{0x02} \,\|\, \mathsf{SHA\text{-}256}\bigl( \mathsf{sorted\_pairs}(\mathcal{D}, \{PK_d\}_{d \in \mathcal{D}}) \,\|\, \text{``|unit:tardus-sol|''} \,\|\, \text{``|epoch:''} \,\|\, e \,\|\, \text{``|''} \bigr),
+\]
+where $e$ is the epoch number. The version byte $\mathtt{0x02}$ distinguishes TARDUS keyset IDs from Cashu v1 ($\mathtt{0x00}$) and Cashu v2 ($\mathtt{0x01}$). Clients are required to recompute this identifier locally upon receiving any mint response and reject mismatched identifiers (\Cref{sec:wallet}).
+
+\subsection{Threshold Blind Signing}
+\label{sec:mint-blindsig}
+
+Given a ratified joint key $PK$ for a denomination $d$, the mint produces blind Schnorr signatures via the construction of~\Cref{con:blind-threshold}. The four-round protocol is realised concretely as follows. Throughout, $\mathsf{session\_id}$ is a fresh $128$-bit identifier sampled by the user, binding the four rounds together.
+
+\subsubsection{Round 1 --- Commitment Aggregation}
+\label{sec:mint-sign-r1}
+
+The user submits an issuance request $(\mathsf{session\_id}, d)$ to the PAE. Each signing validator $V_i$ (in some chosen signing set $S$ with $|S| = t$, selected by stake-weighted rotation) samples $k_i \leftarrow_\$ \mathbb{F}_\ell$ inside its HSM, computes $R_i = k_i G$, and publishes $R_i$ to the aggregator (which may be the PAE of any participating validator). The aggregator computes
+\[
+  R = \sum_{i \in S} R_i
+\]
+and forwards $R$ to the user, along with the chosen signing set $S$ and a $\mathsf{TranscriptSignature}$ binding $(\mathsf{session\_id}, S, R)$ to the issuing committee.
+
+\subsubsection{Round 2 --- User Blinding}
+\label{sec:mint-sign-r2}
+
+The user samples $\alpha, \beta \leftarrow_\$ \mathbb{F}_\ell$ and computes the unblinded commitment, blinded challenge, and forwards the latter:
+\begin{align*}
+  R' &= R + \alpha G + \beta \cdot PK \\
+  c' &= H_{\mathbb{F}_\ell}(R' \,\|\, PK \,\|\, m) \\
+  c &= c' + \beta \pmod{\ell}
+\end{align*}
+where $m$ is the coin payload (\Cref{sec:refresh}). The user retains $(\alpha, \beta, R', \mathsf{session\_id})$ as private state, persisted via the trust-boundary serialisation discipline of \Cref{sec:wallet}.
+
+\subsubsection{Round 3 --- Partial Response Aggregation}
+\label{sec:mint-sign-r3}
+
+Each validator $V_i$ in $S$ computes its partial signature
+\[
+  s_i = k_i + c \cdot \lambda_i^{(S)} \cdot sk_i \pmod{\ell},
+\]
+where $\lambda_i^{(S)} = \prod_{j \in S, j \neq i} \frac{-j}{i - j} \pmod{\ell}$ is the Lagrange interpolation coefficient at $i$ over signing set $S$, and broadcasts $s_i$. The aggregator computes
+\[
+  s = \sum_{i \in S} s_i
+\]
+and forwards $s$ to the user.
+
+\subsubsection{Round 4 --- User Unblinding}
+\label{sec:mint-sign-r4}
+
+The user computes
+\[
+  s' = s + \alpha \pmod{\ell}
+\]
+and emits the unblinded signature $\sigma' = (R', s')$, which by direct verification of $s' G = R' + c' \cdot PK$ is a valid Schnorr signature on $m$ under $PK$ per~\Cref{con:schnorr}.
+
+\begin{remark}
+\label{rem:nonce-reuse}
+A validator $V_i$ that participates with the same $(k_i, \mathsf{session\_id})$ pair in two distinct rounds reveals its share $sk_i$ to anyone who observes both partial signatures (the standard Schnorr nonce-reuse attack, lifted to the threshold setting). The mint protocol prohibits this; each validator's HSM enforces a unique-$k$-per-$\mathsf{session\_id}$ invariant by tracking session IDs in a tamper-evident log. A validator caught violating this invariant is removed from the committee via the revoke path of \Cref{sec:mint-revoke}.
+\end{remark}
+
+\subsection{Proactive Secret-Sharing Rotation}
+\label{sec:mint-rotation}
+
+To bound long-term metadata-correlation risk and mitigate slow share-extraction attacks against individual validators, the joint secret is rotated every epoch ($1$ day) via a proactive secret-sharing protocol:
+
+\begin{enumerate}[leftmargin=2em,itemsep=0.2em]
+  \item At epoch boundary $e \to e + 1$, the committee initiates a \emph{reshare ceremony} with a fresh $\mathsf{ceremony\_id}$.
+  \item Each validator $V_i$ acts as a VSS dealer for the zero polynomial: it samples $\tilde{f}_i(x) = \tilde{a}_{i,1} x + \cdots + \tilde{a}_{i,t-1} x^{t-1}$ with $\tilde{f}_i(0) = 0$. The shares $\tilde\sigma_{i \to j} = \tilde{f}_i(j)$ are distributed and verified analogously to~\Cref{sec:mint-dkg-r1}.
+  \item Each validator $V_j$ updates its share:
+    \[
+      sk_j^{(e+1)} = sk_j^{(e)} + \sum_{i \in \mathsf{QUAL}^{(e+1)}} \tilde{f}_i(j) \pmod{\ell}.
+    \]
+  \item The joint public key $PK$ is unchanged because $\sum_i \tilde{f}_i(0) = 0$.
+  \item Each validator securely erases $sk_j^{(e)}$ from HSM after $\mathsf{OVERLAP\_DURATION} = 2$ epochs to preserve in-flight signatures.
+\end{enumerate}
+
+\paragraph{Cheating-dealer protection.} Soundness against a reshare dealer that tries to shift the joint key requires the explicit verifier check $\tilde{A}_{i,0} = \mathcal{O}$ (the group identity), since $\tilde{A}_{i,0} = \tilde{f}_i(0) \cdot G$. A non-identity commitment indicates $\tilde{f}_i(0) \neq 0$, which would alter $PK$. Verifiers reject any reshare broadcast that fails this check.
+
+After a reshare, an attacker who held $\geq t-1$ shares from epoch $e$ obtains no advantage in epoch $e+1$, because the share polynomial has changed despite the same $PK$.
+
+The committee maintains a $\mathsf{LOOKAHEAD} = 30$-epoch buffer of pre-completed reshare ceremonies, so that scheduled or emergency rotation is always available without waiting for ceremony completion.
+
+\subsection{Denomination Key Revocation}
+\label{sec:mint-revoke}
+
+If a denomination key is compromised (e.g., $\geq t$ validators' shares are extracted, or a critical implementation flaw is discovered), it must be revoked. Revocation is a threshold-signed on-chain transaction that:
+
+\begin{enumerate}[leftmargin=2em,itemsep=0pt]
+  \item Marks $PK_d$ as revoked in the on-chain keyset registry.
+  \item Triggers the recoup path of~\Cref{sec:mint-recoup}.
+  \item Schedules an emergency DKG ceremony for $d$ with a new $PK_d^{\text{new}}$.
+\end{enumerate}
+
+Because revocation requires $\geq t$ committee signatures, no individual operator can forcibly revoke a key. A revocation transaction structure is fully specified in~\Cref{sec:onchain}.
+
+\subsection{Recoup Protocol}
+\label{sec:mint-recoup}
+
+Following a revocation, users holding coins issued under the revoked $PK_d$ exchange them for new coins under $PK_d^{\text{new}}$ via the recoup protocol:
+
+\begin{enumerate}[leftmargin=2em,itemsep=0.2em]
+  \item The user presents a coin $(s, \sigma)$ from the revoked keyset to the mint together with a fresh blind issuance request under $PK_d^{\text{new}}$.
+  \item The mint verifies the old signature, marks the old serial as recouped (nullifying it), and proceeds with a normal blind issuance under $PK_d^{\text{new}}$.
+  \item The user obtains a new coin of equal denomination.
+\end{enumerate}
+
+Recoup is rate-limited per epoch to prevent a denial-of-service campaign from saturating the mint; the rate is set such that all legitimate revoked coins can be migrated within $\mathsf{LOOKAHEAD}$ epochs.
+
+\subsection{Slot-Windowed Batch Swap and Uniform Fee Enforcement}
+\label{sec:mint-batch}
+
+To prevent timing- and fee-based deanonymisation, TARDUS issuance transactions are restricted to specific slot windows during which all issuance transactions in flight are batched into a Jito bundle. Inside a bundle:
+
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item Every TARDUS transaction pays a uniform protocol fee of $10^{-4}$ SOL.
+  \item Priority-fee variation is prohibited; transactions with non-uniform priority fees are rejected by the on-chain program (\Cref{sec:onchain}).
+  \item The bundle ordering is randomised by the bundle coordinator (chosen by stake-weighted rotation per epoch), masking submission order from the chain observer.
+\end{itemize}
+
+This design follows the mitigation analysis of round 4 (committee item R6) and addresses the MEV attack surface identified in \Cref{sec:security}.
+
+\subsection{Fee-Payer Privacy Hardening}
+\label{sec:mint-fee-payer-privacy}
+
+The Solana base layer reveals the \texttt{fee\_payer} of every
+transaction. If a TARDUS user always pays their own fees, an
+on-chain graph crawler can correlate all of that user's spends to
+a single wallet — regardless of how strong the off-chain blind sign
++ sealed-box stack is. v1.5 ships a three-layer mitigation:
+
+\paragraph{Layer 1 — Ephemeral payer (Faz 9.1).} For each
+spend-class TX (Refresh, Withdraw), the client generates a fresh
+ed25519 keypair, funds it from a sponsor wallet with a small
+amount (default $10^{-3}$ SOL), and uses the ephemeral as the TX
+\texttt{fee\_payer}. The ephemeral keypair is then dropped;
+remaining dust lamports stay stranded on-chain. Result: each
+TARDUS spend has a previously-unseen signer.
+
+\paragraph{Layer 2 — Multi-sponsor pool rotation (Faz 9.2).} The
+single sponsor wallet of Layer 1 is replaced by a randomly-rotated
+selection from a set of sponsor keypairs. Per-TX random sponsor
+selection breaks the "all ephemeral payers funded from the same
+sponsor" link.
+
+\paragraph{Layer 3 — On-chain SponsorPool (Faz 9.3, 9.4, 9.5).}
+A program-owned PDA pools SOL deposits from any number of
+independent funders. \texttt{SponsorPayout} drains a fixed amount
+(default $10^{-3}$ SOL) from the pool to a fresh ephemeral
+keypair. Anyone can deposit; anyone can call payout; the pool
+commingles. The funding chain becomes:
+\[
+  \{\text{anonymous depositors}\} \rightarrow \text{SponsorPool PDA} \rightarrow \text{fresh ephemeral} \rightarrow \text{Refresh TX}
+\]
+which decouples the original SOL source from the spend signer.
+The pool is rate-limited (default: one payout per five Solana
+slots, $\approx 2.5\,\text{s}$) to bound drain attacks.
+
+\paragraph{Layer 4 — Pool caller rotation (Faz 9.5).} The wallet
+that submits the \texttt{SponsorPayout} TX is itself selected at
+random from the same multi-sponsor pool, so the
+"deployer always calls payout" residual leak is closed.
+
+\paragraph{Residual leaks not addressed by Layers 1--4.}
+
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item The \texttt{SponsorPayout} TX is publicly visible (anyone
+    can correlate "pool $\rightarrow$ ephemeral X" by reading the
+    TX data). Mitigation: many ephemerals + many payouts $\rightarrow$
+    statistical unlinkability via pool size. Production deployments
+    should keep ephemeral-creation rate high enough that any
+    particular ephemeral is one of many in flight.
+  \item The TX submitter's IP address. Mitigation: Tor / I2P
+    circuit between user wallet and Solana RPC endpoint
+    (\Cref{sec:relay-failure-modes} R7, deployment concern).
+  \item Per-slot timing fingerprinting. Mitigation: random
+    submission delays + Jito bundle ordering
+    (\Cref{sec:mint-batch}).
+\end{itemize}
+
+\paragraph{Threat model improvement (concrete numbers).} For 100
+TARDUS spends over a week, with a sponsor pool of 5 wallets and
+random pool caller selection:
+
+\begin{center}
+\small
+\begin{tabular}{lrrr}
+\toprule
+Posture & Distinct signers & Distinct funders & Direct link rate \\
+\midrule
+Plain (v8): user pays own fee     & 1 (the user)         & 1                  & 100\% \\
+Layer 1: ephemeral payer          & 100 (one per TX)     & 1 (single sponsor) & 100\% via funding chain \\
+Layer 2: multi-sponsor pool       & 100                  & 5                  & $\approx 20\%$ per sponsor \\
+Layer 3+4: on-chain SponsorPool   & 100                  & pool-aggregated    & 0\% direct, statistical only \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Validator Daemon Reference Surface}
+\label{sec:mint-validator-daemon}
+
+The Phase 1 reference implementation of the mint-side committee
+member is the \texttt{tardus-validator} daemon, a long-running HTTP
+service that holds one share of the joint mint key, coordinates with
+its $n-1$ peers over the ceremony protocols of
+\Cref{sec:mint-dkg,sec:mint-blindsig,sec:mint-rotation}, and exposes
+the user-facing signing endpoints. This subsection documents the
+v2 endpoint surface; the wire-level Borsh encoding for each request
+/ response payload lives in the daemon's
+\texttt{crates/tardus-validator} source.
+
+\paragraph{Ceremony coordination (peer-to-peer, mTLS).}
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\toprule
+HTTP path & Role \\
+\midrule
+\verb|POST /dkg/start|       & each daemon's local share + broadcast \\
+\verb|POST /dkg/contribute|  & cross-feed peer contributions \\
+\verb|POST /dkg/finalize|    & finalise joint\_pk \\
+\verb|POST /reshare/start|   & v2.6 zero-poly reshare initiation \\
+\verb|POST /reshare/contribute| & peer reshare contribution intake \\
+\verb|POST /reshare/finalize|   & rotate to new epoch's share \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{User-facing signing (anonymous, TLS).}
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\toprule
+HTTP path & Role \\
+\midrule
+\verb|POST /sign/round1|     & user's $R$ commitment intake; daemon returns $k$-nonce \\
+\verb|POST /sign/round3|     & user's blinded $c$; daemon returns blind partial signature \\
+\verb|POST /refresh/round1|  & user's $\{\hat{c}_\gamma\}$ commitments; daemon returns nonces \\
+\verb|POST /refresh/round5|  & user's $\{c_\gamma\}$ after cut-and-choose reveal; daemon signs \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Operator probes (HTTP, no auth).}
+\verb|GET /health| (uptime, ceremony counts, share count),
+\verb|GET /info| (operator name, joint\_pk \emph{compressed}, bind
+addr, share backend), \verb|GET /version| (build hash, dep
+versions).
+
+\paragraph{Share backend trait.} \texttt{tardus-validator} dispatches
+share-record persistence through a \texttt{ShareStore} trait
+implemented by:
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item \texttt{FileShareStore} (v2.1) — AEAD-sealed
+        \texttt{ChaCha20-Poly1305} ciphertext under
+        \texttt{HKDF-SHA-512(master\_seed)}, atomic
+        tmp-and-rename writes.
+  \item \texttt{Pkcs11ShareStore} (v2.11, behind the \texttt{hsm}
+        cargo feature) — HSM-resident AES-256-GCM wrap key with
+        \texttt{CKA\_EXTRACTABLE=false}. The wrap key never leaves
+        the device; the daemon round-trips through
+        \texttt{C\_Encrypt}/\texttt{C\_Decrypt} per save/load.
+\end{itemize}
+
+\paragraph{Transparency log.} Every ceremony state transition
+(DKG/sign/refresh/reshare per session) appends a hash-chained
+JSON-lines event:
+$\mathsf{event}_i = \{\mathsf{kind},\,\mathsf{ts},\,\mathsf{prev\_hash},\,\mathsf{payload\_digest}\}$
+with $\mathsf{prev\_hash}_i = \mathsf{SHA\text{-}256}(\mathsf{event}_{i-1})$.
+The genesis event has $\mathsf{prev\_hash} = \mathbf{0}^{32}$.
+Operators publish the head hash hourly; an external auditor with the
+head hash can reject any post-hoc rewrite (insertion, deletion,
+reordering) of validator behaviour.
+
+\subsection{Operational Failure Modes}
+\label{sec:mint-failures}
+
+A non-exhaustive enumeration of mint-side failure modes appears in~\Cref{sec:failure-modes}. The most operationally-relevant are:
+
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item \textbf{Validator offline during signing.} If $|S \cap \mathsf{ONLINE}| < t$, the aggregator selects an alternative signing set from the lookahead schedule. If no $t$-subset is online, issuance is queued until the lookahead can be refreshed.
+  \item \textbf{Ceremony abort.} A failed DKG or reshare ceremony is restarted with a fresh $\mathsf{ceremony\_id}$. Repeated failures (more than three within an epoch) trigger an alert and pause issuance under the affected denomination until manual review.
+  \item \textbf{Nonce-reuse attempt.} As~\Cref{rem:nonce-reuse} describes, an HSM-enforced unique-$k$ invariant catches the canonical attack; a violating validator is automatically removed from the active committee via the revoke path of~\Cref{sec:mint-revoke}.
+\end{itemize}

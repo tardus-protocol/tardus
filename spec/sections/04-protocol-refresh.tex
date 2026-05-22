@@ -1,0 +1,151 @@
+\section{Refresh Protocol}
+\label{sec:refresh}
+
+The refresh protocol is the primary spending and change-making operation of TARDUS. A user holding a valid coin under the current joint key surrenders it to the mint in exchange for one or more fresh coins whose serial numbers are unlinkable to the surrendered coin. Refresh subsumes both ``swap'' (one coin in, one coin out, same denomination) and ``change'' (one coin in, multiple coins out summing to the original denomination) in a single protocol.
+
+The construction is the $\kappa$-fold cut-and-choose refresh of~\cite{dold2019} (DD-62), adapted to the threshold blind Schnorr setting of~\Cref{sec:mint-blindsig}. The default parameter is $\kappa = 3$, giving a per-attempt detection probability of $1 - 1/\kappa = 2/3$ against a cheating user.
+
+\subsection{Coin Model}
+\label{sec:refresh-coin}
+
+A \emph{coin} is a triple $(x, Cp, \sigma)$:
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item $x \in \mathbb{F}_\ell$ is the secret seed (the spending key).
+  \item $Cp = x \cdot G$ is the coin's public commitment.
+  \item $\sigma$ is a valid Schnorr signature of $Cp$ (in its 32-byte compressed encoding) under the joint mint key $PK$ for the coin's denomination.
+\end{itemize}
+
+To verify a coin, one checks $\mathsf{Verify}(PK, Cp, \sigma) = \mathbf{1}$ per~\Cref{con:schnorr}.
+
+To spend a coin to the on-chain ledger (\Cref{sec:onchain}), the holder presents $(Cp, \sigma)$. The on-chain program verifies the signature against $PK$ and records the \emph{nullifier}
+\[
+  \mathsf{null}(Cp) = \mathsf{SHA\text{-}256}(\text{``TARDUS-nullifier-v1''} \,\|\, Cp.\mathsf{bytes}())
+\]
+in the compressed nullifier tree. Double-spend is prevented by uniqueness of nullifier insertion: any subsequent attempt to spend the same coin produces the same nullifier and is rejected.
+
+\paragraph{Bearer-only authentication.} The coin secret $x$ is never revealed on-chain. Whoever holds $(Cp, \sigma)$ can spend the coin; the secret remains private (a wallet-only artefact retained for the user's bookkeeping). The earlier draft of this protocol tied the nullifier to $x$, which required the on-chain program to recompute $Cp = x \cdot G$ — incompatible with Solana SBF's stack budget (\texttt{research/PRODUCTION\_LESSONS.md} §R8, discovered in v1.4.2). The $\mathsf{null}(Cp)$ formulation moves all curve arithmetic off-chain to the Solana \texttt{ed25519} precompile.
+
+\subsection{Session Parameters}
+\label{sec:refresh-params}
+
+A refresh session is parameterised by:
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item $\mathsf{session\_id} \in \{0,1\}^{128}$ --- fresh per session, prevents cross-session replay and binds the four threshold-signing rounds (\Cref{sec:mint-blindsig}) together within the refresh.
+  \item $\kappa \in \mathbb{N}$ --- cut-and-choose parameter; default $\kappa = 3$.
+  \item $S \subseteq [n]$ --- signing set of size $t$ chosen from the active committee via stake-weighted rotation.
+  \item $\mathsf{old\_coin} = (x_{\mathsf{old}}, Cp_{\mathsf{old}}, \sigma_{\mathsf{old}})$ --- the coin being surrendered.
+\end{itemize}
+
+\subsection{Coin Secret Derivation}
+\label{sec:refresh-derivation}
+
+Fresh coin secrets are derived from per-candidate seeds via HKDF, never from a long-term wallet seed via BIP32. This is the explicit lesson from the Cashu NUT-13 disclosure (\texttt{research/PRODUCTION\_LESSONS.md} §L2): deterministic seed-based scalar derivation creates the keyset-collision attack surface; we forbid it.
+
+Concretely, the user samples a fresh $\mathsf{seed}_\gamma \in \{0,1\}^{256}$ uniformly for each candidate $\gamma \in [1, \kappa]$, and derives:
+\begin{align*}
+  \mathsf{ikm}_\gamma   &\gets \mathsf{seed}_\gamma, \\
+  \mathsf{prk}_\gamma   &\gets \mathsf{HKDF\text{-}Extract}(\text{``TARDUS-refresh-v1''}, \mathsf{ikm}_\gamma), \\
+  \mathsf{okm}_\gamma   &\gets \mathsf{HKDF\text{-}Expand}(\mathsf{prk}_\gamma, \text{``coin-secret''}, 64\text{ bytes}), \\
+  x_\gamma            &\gets \mathsf{okm}_\gamma \bmod \ell,
+\end{align*}
+with the reduction-bias bound $\ell / 2^{512} \approx 2^{-260}$ (negligible; cf.~\Cref{sec:hash}). The seed is one-shot and never reused, so the deterministic-collision surface that NUT-13 exposed cannot arise.
+
+\subsection{Six-Round Protocol}
+\label{sec:refresh-rounds}
+
+The refresh protocol runs six rounds. Rounds 1, 3, and 5 are mint-initiated; Rounds 2, 4, and 6 are user-initiated. Each round message carries the $\mathsf{session\_id}$ in the clear; mismatches abort the session (\Cref{sec:refresh-abort}).
+
+\subsubsection{Round 1 --- Mint \texorpdfstring{$\kappa$}{kappa}-fold Commitment}
+\label{sec:refresh-r1}
+
+Each signing validator $V_i \in S$ samples $\kappa$ independent nonces $k_{i,\gamma} \leftarrow_\$ \mathbb{F}_\ell$ for $\gamma \in [1, \kappa]$, computes $R_{i,\gamma} = k_{i,\gamma} \cdot G$, and broadcasts the set. The aggregator computes
+\[
+  R_\gamma = \sum_{i \in S} R_{i,\gamma} \quad \text{for each } \gamma \in [1, \kappa]
+\]
+and forwards the $\kappa$ aggregated points to the user.
+
+\paragraph{Nonce-reuse invariant.} The HSM-enforced unique-$(k_{i,\gamma}, \mathsf{session\_id}, \gamma)$ tracking of~\Cref{sec:mint-blindsig} extends to the $\kappa$-fold case: $\gamma$ is included in the tracking tuple.
+
+\subsubsection{Round 2 --- User Blinded Challenges}
+\label{sec:refresh-r2}
+
+The user samples $\kappa$ fresh seeds, derives candidate coin secrets per~\Cref{sec:refresh-derivation}, and produces $\kappa$ blinded challenges. For each $\gamma \in [1, \kappa]$:
+\begin{enumerate}[leftmargin=2em,itemsep=0.1em]
+  \item Sample $\mathsf{seed}_\gamma \leftarrow_\$ \{0,1\}^{256}$, derive $x_\gamma$.
+  \item Compute $Cp_\gamma = x_\gamma \cdot G$, encode $\mathsf{msg}_\gamma = Cp_\gamma.\mathsf{compress}().\mathsf{bytes}()$.
+  \item Sample $\alpha_\gamma, \beta_\gamma \leftarrow_\$ \mathbb{F}_\ell$.
+  \item Compute the blinded commitment $R'_\gamma = R_\gamma + \alpha_\gamma G + \beta_\gamma \cdot PK$.
+  \item Compute the blinded challenge $c_\gamma = H_{\mathbb{F}_\ell}(R'_\gamma \,\|\, PK \,\|\, \mathsf{msg}_\gamma) + \beta_\gamma \pmod{\ell}$.
+\end{enumerate}
+The user submits $\{c_\gamma\}_{\gamma=1}^{\kappa}$ to the mint together with the surrendered $\mathsf{old\_coin}$.
+
+\subsubsection{Round 3 --- Mint Cut-and-Choose}
+\label{sec:refresh-r3}
+
+The mint verifies $\mathsf{Verify}(PK, Cp_{\mathsf{old}}, \sigma_{\mathsf{old}}) = \mathbf{1}$. If valid, the mint samples $\gamma^\star \leftarrow_\$ [1, \kappa]$ uniformly at random (via the committee VRF; deterministic from $\mathsf{session\_id}$ to avoid manipulation) and sends $\gamma^\star$ to the user as the challenge.
+
+\subsubsection{Round 4 --- User Reveal}
+\label{sec:refresh-r4}
+
+The user reveals $\{ (\mathsf{seed}_\gamma, \alpha_\gamma, \beta_\gamma) \}_{\gamma \neq \gamma^\star}$ --- all $\kappa - 1$ candidates except the challenged one. The mint, for each revealed $\gamma$, re-derives $x_\gamma$, $Cp_\gamma$, $R'_\gamma$, recomputes $c_\gamma$, and verifies that the recomputed value matches the $c_\gamma$ the user submitted in Round 2.
+
+If any verification fails, the session aborts (\Cref{sec:refresh-abort}) and the old coin's nullifier is~\emph{not} inserted; the user must retry from Round 1 with a fresh session.
+
+\subsubsection{Round 5 --- Mint Partial Signing}
+\label{sec:refresh-r5}
+
+If all $\kappa-1$ revealed candidates verified, the mint proceeds to sign the $\gamma^\star$-th candidate. Each $V_i \in S$ computes the partial signature
+\[
+  s_{i, \gamma^\star} = k_{i, \gamma^\star} + c_{\gamma^\star} \cdot \lambda_i^{(S)} \cdot sk_i \pmod{\ell}
+\]
+exactly as in~\Cref{sec:mint-sign-r3}. The aggregator returns
+\[
+  s_{\gamma^\star} = \sum_{i \in S} s_{i, \gamma^\star}
+\]
+to the user, together with proof that $Cp_{\mathsf{old}}$ has been inserted into the nullifier tree (the on-chain transaction signature).
+
+\subsubsection{Round 6 --- User Unblinding}
+\label{sec:refresh-r6}
+
+The user computes $s'_{\gamma^\star} = s_{\gamma^\star} + \alpha_{\gamma^\star} \pmod{\ell}$. The new coin is
+\[
+  (x_{\gamma^\star}, Cp_{\gamma^\star}, \sigma_{\gamma^\star}) \quad \text{where} \quad \sigma_{\gamma^\star} = (R'_{\gamma^\star}, s'_{\gamma^\star}).
+\]
+By construction, $\mathsf{Verify}(PK, Cp_{\gamma^\star}, \sigma_{\gamma^\star}) = \mathbf{1}$, and the new coin's $Cp_{\gamma^\star}$ is statistically unlinkable to $Cp_{\mathsf{old}}$ (no validator has seen $x_{\gamma^\star}$ or the unblinding factors).
+
+\subsection{Anonymity Argument}
+\label{sec:refresh-anon}
+
+For a malicious mint coalition of size $< t$, the only data observed during refresh are:
+\begin{enumerate}[leftmargin=2em,itemsep=0pt]
+  \item The surrendered $(Cp_{\mathsf{old}}, \sigma_{\mathsf{old}})$ and the user's challenges $\{c_\gamma\}$.
+  \item The challenge $\gamma^\star$ (publicly fixed by VRF).
+  \item The revealed candidates' $(seed_\gamma, \alpha_\gamma, \beta_\gamma)$ for $\gamma \neq \gamma^\star$.
+  \item The partial signature contributions $\{s_{i, \gamma^\star}\}_{i \in S}$.
+\end{enumerate}
+The new coin's secret $x_{\gamma^\star}$ and pubkey $Cp_{\gamma^\star}$ are not in this view. The blinded challenge $c_{\gamma^\star}$ is, by the statistical-blindness argument of~\Cref{thm:blindness}, statistically independent of the unblinded signature $\sigma_{\gamma^\star}$ and message $Cp_{\gamma^\star}$. Therefore, the mint coalition cannot link the new coin to the old coin with probability exceeding $1/2$ over the natural sample space.
+
+\subsection{Cheating-User Detection Rate}
+\label{sec:refresh-detection}
+
+A cheating user who substitutes a $c_\gamma$ that is inconsistent with their announced derivation must hope that the mint chooses $\gamma^\star = \gamma$ (the inconsistent candidate). Otherwise, the inconsistency is exposed by the Round-4 verification. Across an i.i.d.~uniform random $\gamma^\star$, the probability of evasion is $1/\kappa$. For $\kappa = 3$, this is $33\%$ per attempt --- a single attempt is detected with $67\%$ probability, two attempts with $89\%$, three with $96\%$. Repeated cheating attempts thus give the mint information-theoretic confidence in malicious user identification, while leaving an honest user with zero detection probability.
+
+\subsection{Abort Handling}
+\label{sec:refresh-abort}
+
+Any of the following triggers a session abort:
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item $\mathsf{session\_id}$ mismatch in any round message.
+  \item Invalid $\sigma_{\mathsf{old}}$ in Round 3.
+  \item Failed reveal verification in Round 4.
+  \item Threshold signing failure in Round 5 (e.g., $< t$ validators online).
+\end{itemize}
+
+On abort:
+\begin{enumerate}[leftmargin=2em,itemsep=0pt]
+  \item The old coin's nullifier is~\emph{not} inserted; the coin remains spendable.
+  \item All session state (per-validator $k_{i,\gamma}$, user $\alpha_\gamma, \beta_\gamma, \mathsf{seed}_\gamma$) is securely erased.
+  \item The user may retry with a fresh $\mathsf{session\_id}$.
+\end{enumerate}
+
+The user's recoverable state across a Round-1-through-Round-6 protocol fault is captured by serialising the user's $\kappa$-tuple $\{\mathsf{seed}_\gamma, \alpha_\gamma, \beta_\gamma, R'_\gamma, c_\gamma\}$ to encrypted local storage between Rounds 2 and 6 (\Cref{sec:wallet}).

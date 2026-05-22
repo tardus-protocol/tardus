@@ -1,0 +1,35 @@
+# cargo-audit configuration for TARDUS workspace.
+#
+# All ignored advisories are transitively pulled by the Solana
+# 2.3.x toolchain and are not directly reachable from TARDUS
+# production code. The TARDUS workspace itself uses the patched
+# versions:
+#
+#   curve25519-dalek = "4.1.3"   (safe, RUSTSEC-2024-0344 fixed)
+#   ed25519-dalek    not a direct dep  (Solana's transitive use only)
+#
+# Each ignore line carries a brief reason. Audit this file on every
+# Solana SDK upgrade; remove entries that no longer appear.
+
+[advisories]
+ignore = [
+  # ── curve25519-dalek 3.2.0 (transitive via Solana solana-zk-token-sdk
+  #    and dev-deps solana-program-test). TARDUS production crates depend
+  #    on curve25519-dalek 4.x directly.
+  "RUSTSEC-2024-0344",
+
+  # ── ed25519-dalek 1.0.1 (transitive via Solana solana-signature and
+  #    dev-deps solana-program-test). TARDUS does not depend on
+  #    ed25519-dalek directly; signing uses ed25519-dalek-bip32 + the
+  #    Solana ed25519 precompile.
+  "RUSTSEC-2022-0093",
+
+  # ── rustls-webpki 0.101.7 (transitive via solana-pubsub-client →
+  #    tokio-tungstenite 0.20). TARDUS production transport (HTTPS RPC
+  #    via reqwest) uses the patched rustls-webpki 0.103.13 already
+  #    present in the tree. The vulnerable copy only services optional
+  #    WebSocket pubsub paths.
+  "RUSTSEC-2026-0098",
+  "RUSTSEC-2026-0099",
+  "RUSTSEC-2026-0104",
+]

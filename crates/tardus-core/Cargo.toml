@@ -1,0 +1,25 @@
+[package]
+name              = "tardus-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license-file.workspace = true
+publish.workspace = true
+description       = "TARDUS core cryptographic primitives: Schnorr + Blind Schnorr (spec §2.4-§2.5)."
+
+[dependencies]
+curve25519-dalek = { version = "4", default-features = false, features = ["alloc", "zeroize", "rand_core", "precomputed-tables"] }
+sha2             = { version = "0.10", default-features = false }
+rand_core        = { version = "0.6", default-features = false }
+zeroize          = { version = "1", default-features = false, features = ["derive"] }
+subtle           = { version = "2", default-features = false }
+borsh            = { version = "1", default-features = false, features = ["derive"] }
+
+[dev-dependencies]
+rand        = "0.8"
+rand_chacha = "0.3"
+hex         = "0.4"
+
+[lints]
+workspace = true

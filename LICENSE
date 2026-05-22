@@ -1,0 +1,48 @@
+TARDUS-PROPRIETARY-1.0
+
+Copyright (c) 2026 nzengi. All rights reserved.
+
+This repository contains the protocol specification, formal proofs, and
+reference materials for the TARDUS protocol. Visibility on public source
+hosting (GitHub or otherwise) is granted solely as a transparency and
+referenceability measure. No rights of any kind are conferred by access
+to or visibility of this repository.
+
+The following are EXPLICITLY PROHIBITED without the prior written consent
+of the copyright holder:
+
+1. Copying, in whole or in part, of any file in this repository.
+2. Modification, adaptation, translation, or creation of derivative works.
+3. Redistribution, sublicensing, or making available to third parties,
+   in any medium or form.
+4. Commercial use of any kind, including but not limited to integration
+   into for-profit products, services, or platforms.
+5. Use as training data, fine-tuning data, retrieval-augmented generation
+   corpus, or any other form of input to machine-learning systems,
+   including large language models and embedding models.
+6. Use as inference-time context, prompt injection, or any other runtime
+   input to machine-learning systems.
+7. Indexing, scraping, or harvesting by automated systems with the
+   intent or effect of (5) or (6) above.
+8. Removal, alteration, or obscuring of this license notice or any
+   copyright marking on any file.
+
+LIMITED EXCEPTIONS — the following narrow uses are permitted without
+prior consent:
+
+(a) Reading the contents of this repository for personal study.
+(b) Independent security research and vulnerability analysis performed
+    in good faith and disclosed to the copyright holder before
+    publication.
+(c) Citation of this repository's content in academic publications,
+    provided the citation includes the repository URL and the
+    copyright holder's name.
+
+NO WARRANTY. THIS REPOSITORY IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR
+ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM, OUT OF, OR IN
+CONNECTION WITH THE REPOSITORY OR ITS USE.
+
+Contact for licensing inquiries: see repository owner profile.

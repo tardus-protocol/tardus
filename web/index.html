@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Send native SOL privately on Solana. Connect a wallet, claim or send through TARDUS bearer-cash, no chain edge between sender and receiver." />
+    <meta name="theme-color" content="#F5F3FF" />
+    <meta name="color-scheme" content="light" />
+
+    <!-- Content-Security-Policy (committee Q5 hardening).
+         Production deploy MUST move this to an HTTP response header so the
+         policy is honoured before the meta tag is parsed. See SECURITY.md. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="
+        default-src 'self';
+        script-src 'self' 'wasm-unsafe-eval';
+        style-src 'self' 'unsafe-inline';
+        font-src 'self' data:;
+        img-src 'self' data: blob:;
+        connect-src 'self' https://api.devnet.solana.com wss://api.devnet.solana.com http://localhost:* ws://localhost:* https://* wss://*;
+        frame-ancestors 'none';
+        base-uri 'self';
+        form-action 'none';
+        object-src 'none';
+      "
+    />
+    <meta http-equiv="X-Content-Type-Options" content="nosniff" />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+
+    <title>tardus — private payments on Solana</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

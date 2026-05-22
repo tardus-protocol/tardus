@@ -1,0 +1,406 @@
+\section{On-Chain Solana Program}
+\label{sec:onchain}
+
+The on-chain component of TARDUS is a single native Solana program that custodies the collateral vault, maintains the keyset registry, enforces the nullifier set, and verifies coin spends. The program is written in pure Rust (no Anchor) and runs on the Solana BPF / SBF virtual machine. This section specifies the account model, the instruction set, the per-instruction compute-unit budget, and the security invariants the program enforces.
+
+\subsection{Program Overview}
+\label{sec:onchain-overview}
+
+The on-chain program is the trust anchor between the off-chain threshold mint (\Cref{sec:mint}) and the public Solana ledger. It performs no signing of its own --- all coin signatures originate off-chain from the threshold committee. Its responsibilities are:
+
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item Verify coin signatures produced off-chain (via the Solana \texttt{ed25519} signature verification path).
+  \item Maintain the nullifier tree, preventing double-spend (\Cref{sec:refresh-coin}).
+  \item Hold the SPL Token-2022 vault that backs all issued coins of a denomination.
+  \item Track the active keyset registry so verifiers know which $PK$ to use per denomination per epoch.
+  \item Enforce the slot-windowed batch and uniform-fee discipline of~\Cref{sec:mint-batch} when accepting refresh transactions.
+\end{itemize}
+
+The program is \emph{passive}: it does not initiate any operation. All instructions are submitted by users or by the threshold committee (for revoke/registry maintenance).
+
+\subsection{Account Model}
+\label{sec:onchain-accounts}
+
+\subsubsection{Keyset Registry}
+\label{sec:onchain-keyset-registry}
+
+A single program-derived account holds the canonical list of active keysets:
+\[
+  \mathsf{KeysetRegistry} = (\mathsf{version}, [\mathsf{KeysetEntry}_1, \ldots, \mathsf{KeysetEntry}_K])
+\]
+with
+\[
+  \mathsf{KeysetEntry} = (\mathsf{keyset\_id} \in \{0,1\}^{264}, \mathsf{denom} \in \{2^0, \ldots, 2^{32}\}, \mathsf{joint\_pk} \in \{0,1\}^{256}, \mathsf{epoch} \in \mathbb{N}, \mathsf{status} \in \{\mathsf{Active}, \mathsf{Revoked}\}).
+\]
+The PDA seed is $(\text{``tardus''}, \text{``keyset-registry''}, \text{program\_id})$. The account is initialised once at program deployment by a designated bootstrap authority and subsequently updated only via threshold-signed instructions (\Cref{sec:onchain-instr-register}).
+
+\subsubsection{Vault}
+\label{sec:onchain-vault}
+
+For each denomination $d \in \mathcal{D}$, the program owns a Token-2022 Confidential Mint vault account:
+\[
+  \mathsf{Vault}_d = \mathsf{Token\text{-}2022\ Confidential\ Mint}(\mathsf{authority}=\mathsf{PDA}(d), \mathsf{denom}=d)
+\]
+with the PDA seed $(\text{``tardus''}, \text{``vault''}, d.\mathsf{to\_le\_bytes}(), \text{program\_id})$.
+
+The collateral invariant (spec §3.10, EasyCrypt T4) is:
+\[
+  \forall \text{ slot } s: \mathsf{Vault}_d.\mathsf{collateral}(s) = \sum_{cm \in \mathsf{active\_commitments}_d(s)} d.
+\]
+This invariant is preserved atomically across every \texttt{Deposit}, \texttt{Withdraw}, \texttt{Refresh}, and \texttt{Recoup} instruction. The program rejects any state transition that would violate it.
+
+\subsubsection{Nullifier Tree}
+\label{sec:onchain-nullifier-tree}
+
+Spent coins are recorded by their nullifier $\mathsf{null}(x) = \mathsf{SHA\text{-}256}(\text{``TARDUS-nullifier-v1''} \,\|\, x)$ in a Light Protocol compressed Merkle tree of depth $d = 32$ (capacity $\approx 4.3$~billion leaves). The PDA seed is $(\text{``tardus''}, \text{``nullifier-tree''}, \text{program\_id})$.
+
+Each \texttt{Refresh} or \texttt{Withdraw} instruction inserts the surrendered coin's nullifier; duplicate insertion (double-spend) is rejected by the Light account-compression CPI.
+
+\subsection{Instruction Set}
+\label{sec:onchain-instructions}
+
+\subsubsection{Bootstrap}
+\label{sec:onchain-instr-bootstrap}
+
+Allocates a program-owned PDA at canonical seeds. The deployer pays
+rent exemption from their own lamports; the program uses
+\verb|invoke_signed(SystemInstruction::CreateAccount, ...)| under the
+canonical PDA seeds + bump to create the account on its own behalf.
+Idempotent: a second Bootstrap against an existing PDA returns
+\verb|ProgramError::Custom(15)| (\texttt{ERR\_ACCOUNT\_ALREADY\_EXISTS}).
+
+\paragraph{Inputs.}
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item $\mathsf{account\_kind} \in \{\mathsf{KeysetRegistry}, \mathsf{NullifierTree}, \mathsf{Vault}\}$.
+  \item $\mathsf{size}$ (u32) --- allocation size in bytes
+        (ignored for $\mathsf{Vault}$, which is system-owned and
+        lamports-only). Capped at $64\,\mathrm{KiB}$ to prevent DoS.
+  \item $\mathsf{denom}$ (u64) --- denomination for $\mathsf{Vault}$ kind;
+        ignored otherwise.
+\end{itemize}
+
+\paragraph{Effect.} Creates a new program-owned (or system-owned for
+$\mathsf{Vault}$) PDA at the canonical seeds for the kind. Subsequent
+\texttt{RegisterKeyset}, \texttt{Refresh}, \texttt{Withdraw}
+instructions require these PDAs to already exist.
+
+\paragraph{Discovery.} Added in v1.4.7 after early devnet integration
+showed that pre-population of program-owned PDAs via off-chain tools
+is not possible: only the program itself can own the data accounts it
+needs, and \verb|invoke_signed| is the only path to materialise them
+on-chain. \texttt{tardus-cli devnet bootstrap-singletons} and
+\texttt{tardus-cli devnet bootstrap-vault --denom N} are the
+operator-facing front of this instruction.
+
+\subsubsection{RegisterKeyset}
+\label{sec:onchain-instr-register}
+
+Inserts a new keyset entry into the registry. Permitted only via a transaction signed by at least $t$ of the threshold committee's offline master keys.
+
+\paragraph{Inputs.}
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item $\mathsf{keyset\_id}$ ($33$ bytes, derived per~\Cref{sec:mint-keysetid}).
+  \item $\mathsf{denom}$ (u64).
+  \item $\mathsf{joint\_pk}$ ($32$ bytes).
+  \item $\mathsf{epoch}$ (u64).
+  \item $[\mathsf{TranscriptSignature}_1, \ldots, \mathsf{TranscriptSignature}_t]$ (ceremony ratification per~\Cref{sec:mint-dkg-transcript}).
+\end{itemize}
+
+\paragraph{Checks.}
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item Each transcript signature verifies against a registered validator MIK.
+  \item Submitted $\mathsf{keyset\_id}$ matches the canonical derivation from the new $\mathsf{joint\_pk}$.
+  \item Registry has space for the new entry.
+\end{itemize}
+
+\paragraph{Effect.} Appends a new \texttt{Active} entry to the registry. Emits a Solana log event.
+
+\subsubsection{Deposit}
+\label{sec:onchain-instr-deposit}
+
+User sends SOL (or SPL token) to the program's vault for a given denomination, in exchange for an off-chain mint-issued coin.
+
+\paragraph{Inputs.}
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item $\mathsf{denom}$ (u64).
+  \item Lamports transferred via system transfer instruction in the same atomic transaction.
+\end{itemize}
+
+\paragraph{Checks.}
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item Denomination is registered and \texttt{Active}.
+  \item Transferred amount equals $\mathsf{denom}$ exactly.
+\end{itemize}
+
+\paragraph{Effect.} Credits the vault for the denomination. Off-chain, the user proceeds with the threshold mint protocol (\Cref{sec:mint-blindsig}) to receive a coin of the same denomination. The deposit instruction logs the deposit event; the actual coin issuance is mediated by the off-chain mint committee.
+
+\subsubsection{Refresh}
+\label{sec:onchain-instr-refresh}
+
+Atomically: verify the surrendered coin's signature, insert its nullifier, and record the issuance of one or more new coins of equal total denomination.
+
+\paragraph{Inputs.}
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item $Cp_{\mathsf{old}}$ ($32$ bytes) --- the surrendered coin's public commitment.
+  \item $\mathsf{denom}$ (u64) --- denomination of the surrendered coin.
+  \item Off-chain prerequisite: a preceding \texttt{ed25519\_program} precompile instruction in the same transaction, verifying $\mathsf{Verify}(\mathsf{joint\_pk}, Cp_{\mathsf{old}}, \sigma_{\mathsf{old}}) = \mathbf{1}$. The \texttt{Refresh} instruction reads the instructions sysvar to confirm the precompile was invoked with the expected $(\mathsf{joint\_pk}, Cp_{\mathsf{old}})$ pair.
+  \item The new coins $(Cp_{\mathsf{new}}, \sigma_{\mathsf{new}})$ emerge off-chain via the round-6 unblinding of~\Cref{sec:refresh}; they are \emph{not} on-chain in v1.4.3 (anonymity preservation).
+\end{itemize}
+
+\paragraph{Checks.}
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item $\mathsf{denom}$ keyset is \texttt{Active}.
+  \item Precompile pre-instruction verified $\sigma_{\mathsf{old}}$ against $(\mathsf{joint\_pk}, Cp_{\mathsf{old}})$.
+  \item $\mathsf{null}(Cp_{\mathsf{old}}) = \mathsf{SHA\text{-}256}(\text{``TARDUS-nullifier-v1''} \,\|\, Cp_{\mathsf{old}})$ is not already in the nullifier tree.
+\end{itemize}
+
+\paragraph{Effect.} Inserts $\mathsf{nullifier}$ into the nullifier tree. Logs each new coin's issuance (without revealing the coin's secret).
+
+\subsubsection{Withdraw}
+\label{sec:onchain-instr-withdraw}
+
+User redeems a coin for the underlying SOL (or SPL token).
+
+\paragraph{Inputs.} Mirrors the v1.4.3 bearer model used by
+\texttt{Refresh}:
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item $Cp$ ($32$ bytes) --- the surrendered coin's public commitment.
+  \item $\mathsf{denom}$ (u64).
+  \item $\mathsf{recipient}$ ($32$ bytes Pubkey) --- destination for
+        the released lamports.
+  \item Off-chain prerequisite: same ed25519 precompile pre-instruction
+        pattern as \texttt{Refresh} (\Cref{sec:onchain-instr-refresh}).
+\end{itemize}
+
+\paragraph{Checks.}
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item $\mathsf{denom}$ keyset is \texttt{Active}.
+  \item Precompile pre-instruction verified $\sigma$ against $(\mathsf{joint\_pk}, Cp)$.
+  \item $\mathsf{null}(Cp)$ not already present in the nullifier tree.
+  \item Vault PDA has $\geq \mathsf{denom}$ lamports.
+  \item Recipient account matches the instruction's $\mathsf{recipient}$ field.
+\end{itemize}
+
+\paragraph{Effect.} Inserts nullifier; releases $\mathsf{denom}$
+lamports from the vault PDA to the recipient via
+\verb|invoke_signed(SystemInstruction::Transfer, vault → recipient)|
+under the vault's canonical PDA seeds.
+
+\subsubsection{Revoke}
+\label{sec:onchain-instr-revoke}
+
+Permits the threshold committee to mark a keyset as revoked. Required for compromise response (\Cref{sec:mint-revoke}).
+
+\paragraph{Inputs.}
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item $\mathsf{keyset\_id}$ to revoke.
+  \item $[\mathsf{TranscriptSignature}_1, \ldots, \mathsf{TranscriptSignature}_t]$ (threshold-signed authorization).
+\end{itemize}
+
+\paragraph{Effect.} Updates the keyset entry's $\mathsf{status}$ to \texttt{Revoked}. Subsequent \texttt{Refresh} and \texttt{Withdraw} instructions against this keyset use the \texttt{Recoup} path (deferred to v1.5).
+
+\subsubsection{SponsorDeposit / SponsorPayout (v1.4.13)}
+\label{sec:onchain-instr-sponsor}
+
+The on-chain \texttt{SponsorPool} PDA is a community-funded SOL
+faucet that decouples spend-class TX signers from any specific
+funding source (cross-reference \Cref{sec:mint-fee-payer-privacy}).
+
+\paragraph{SponsorDeposit.}
+\begin{description}[leftmargin=2em,itemsep=0pt]
+  \item[Inputs] $\mathsf{amount}$ (u64).
+  \item[Accounts] funder (signer), \texttt{SponsorPool} PDA, system program.
+  \item[Effect] The TX MUST include a paired \texttt{system\_instruction::transfer}
+    from \texttt{funder} to the \texttt{SponsorPool} PDA in the same TX (atomic).
+    The handler updates the running \texttt{total\_deposits} counter.
+\end{description}
+
+\paragraph{SponsorPayout.}
+\begin{description}[leftmargin=2em,itemsep=0pt]
+  \item[Inputs] $\mathsf{lamports}$ (u64), $\mathsf{recipient}$ (Pubkey).
+  \item[Accounts] caller (signer), \texttt{SponsorPool} PDA, recipient, system program.
+  \item[Checks]
+    \begin{itemize}[leftmargin=2em,itemsep=0pt]
+      \item Rate limit: $\mathsf{current\_slot} - \mathsf{last\_payout\_slot} \geq 5$ (otherwise \texttt{ERR\_RATE\_LIMIT = 30}).
+      \item Pool has $\geq \mathsf{lamports}$ available.
+    \end{itemize}
+  \item[Effect] Direct lamport movement (program-owned PDA debit) from
+    \texttt{SponsorPool} to \texttt{recipient}. Updates \texttt{last\_payout\_slot}
+    and \texttt{total\_payouts}.
+\end{description}
+
+\paragraph{Drain bound.} A pure-drain attacker (no honest deposits)
+can withdraw at most $\mathsf{lamports} / (5 \cdot 400\,\text{ms}) =
+0.5 \cdot \mathsf{lamports}\,\text{per second}$. With
+$\mathsf{lamports} = 10^6$ (default 0.001 SOL/payout), the steady-state
+drain ceiling is $\approx 14\,\text{SOL/hour}$. Honest deposit cadence
+must exceed this for the pool to remain liquid.
+
+\subsubsection{ResizeAccount (v1.4.14, scaling)}
+\label{sec:onchain-instr-resize}
+
+Resizes any program-owned PDA (\texttt{KeysetRegistry}, \texttt{NullifierTree},
+\texttt{SponsorPool}) to a larger byte allocation. Required because
+the initial \texttt{Bootstrap} allocations cap at $\approx 11$
+keysets (1024 B) or $\approx 250$ nullifiers (8 KiB).
+
+\paragraph{Inputs.}
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item $\mathsf{account\_kind} \in \{\mathsf{KeysetRegistry}, \mathsf{NullifierTree}, \mathsf{SponsorPool}\}$.
+  \item $\mathsf{new\_size}$ (u32, cap 64 KiB).
+\end{itemize}
+
+\paragraph{Checks.}
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item PDA matches canonical seeds.
+  \item $\mathsf{new\_size} >$ current size.
+  \item Account lamports $\geq \mathsf{rent.minimum\_balance(new\_size)}$;
+    the TX MUST include a paired \texttt{system\_instruction::transfer}
+    for the rent top-up.
+\end{itemize}
+
+\paragraph{Effect.} \texttt{AccountInfo::realloc(new\_size, true)} —
+zero-initialises the new tail bytes so subsequent Borsh
+deserialisation with trailing-padding tolerance
+(\Cref{sec:onchain-security} strict-deserialisation invariant) still
+parses correctly.
+
+\paragraph{Solana realloc 10 KB per-TX limit (discovery \#10).}
+The Solana SBF runtime enforces \texttt{MAX\_PERMITTED\_DATA\_INCREASE
+= 10240 bytes per instruction}. Growing from 1024 B to 65536 B
+therefore requires $\lceil (65536 - 1024)/10240 \rceil = 7$ sequential
+\texttt{ResizeAccount} calls. The CLI's
+\texttt{tardus devnet resize-nullifier-tree} subcommand handles the
+multi-TX batching transparently; operators see a single high-level
+target size.
+
+Long-term replacement: Light Protocol compressed-Merkle-tree
+(\texttt{deploy/runbooks/light-protocol-integration-design.md}, v1.5+).
+
+\subsection{Compute-Unit Budget}
+\label{sec:onchain-cu}
+
+\paragraph{Measured BPF runtime cost (v1.4.6).} The Phase 0 estimates
+shipped in the original draft of this section were 3--10$\times$
+higher than the runtime measurements obtained after the SBF binary
+was deployed on Solana devnet. The current numbers, captured by
+\texttt{tests/sbf\_integration.rs} via \texttt{solana-program-test}
+running in BPF mode (the same SVM Solana uses):
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Instruction & Measured CU & Headroom vs Phase 0 estimate \\
+\midrule
+Bootstrap (each kind)             & $7{,}500 - 9{,}000$ & --- (new in v1.4.7) \\
+RegisterKeyset                    & $13{,}441$          & $\sim 7\times$ better \\
+Refresh (1 in, ed25519 precompile bridge) & $67{,}558$  & $\sim 4\times$ better \\
+Withdraw (precompile + invoke\_signed CPI) & $77{,}152$ & $\sim 3\times$ better \\
+Refresh-reject (precompile missing) & $4{,}840$ before abort & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Per Solana's $1{,}400{,}000$ CU per-transaction limit, the most
+expensive single instruction (\texttt{Withdraw}) uses approximately
+$5.5\%$ of the budget. The default $200{,}000$ CU budget per
+instruction --- without an explicit \texttt{ComputeBudget} prelude ---
+also accommodates every TARDUS instruction comfortably; no caller
+needs to bump the limit.
+
+\paragraph{Architectural shift documented.} The Phase 0 estimate
+assumed in-program \texttt{ed25519} signature verification via
+\texttt{curve25519-dalek} ($\sim 5{,}000$ CU/sig). Implementation
+discovered (\texttt{research/PRODUCTION\_LESSONS.md} §R8) that
+\texttt{curve25519-dalek}'s variable-base scalar-mul lookup-table
+allocation exceeds the 4 KiB SBF stack budget. The fix
+(\Cref{sec:onchain-instr-refresh} and v1.4.4) delegates signature
+verification to Solana's \texttt{ed25519\_program} precompile via the
+instructions-sysvar introspection pattern; the in-program cost is now
+the bridge check ($\sim 6{,}000$ CU) rather than the verification
+itself. The precompile's own cost ($\sim 3{,}000$ CU) is paid by the
+caller in a preceding instruction in the same transaction.
+
+\paragraph{Light Protocol deferred.} The Phase 0 estimate included
+$\sim 40{,}000$ CU for Light Protocol validity-proof verification.
+v1 ships with a plain Borsh-encoded \texttt{NullifierSet} (capacity
+$\sim 250$ entries before the 8 KiB account fills); the Light
+Protocol compressed-Merkle-tree integration is deferred to v1.4.8
+(\Cref{sec:failure-modes} F14).
+
+\subsection{PDA Derivation}
+\label{sec:onchain-pda}
+
+All program-owned accounts use Program-Derived Addresses with the following canonical seed schemes:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Account & PDA seed bytes & Owner \\
+\midrule
+KeysetRegistry & \texttt{("tardus", "keyset-registry")}      & program           \\
+NullifierTree  & \texttt{("tardus", "nullifier-tree")}       & program           \\
+Vault for $d$  & \texttt{("tardus", "vault", d.le\_bytes())} & system program    \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Vault ownership rationale.} Vault PDAs are
+\emph{system-owned} (not program-owned), even though the program
+controls them. This is required by Solana semantics: only the system
+program can debit lamports from accounts it owns, so the vault must
+be system-owned for \texttt{Withdraw}'s
+\verb|invoke_signed(SystemInstruction::Transfer)| to debit it.
+Program-owned data PDAs (\texttt{KeysetRegistry},
+\texttt{NullifierTree}) hold no lamports beyond rent exemption and
+are debited only via account closure (out of scope for v1).
+
+The program enforces canonical-PDA validation on every instruction
+(\texttt{research/PRODUCTION\_LESSONS.md} §L4): each account argument is
+checked to be the canonical PDA derivable from these seeds. This
+blocks the account-confusion attack class
+(\texttt{research/PRODUCTION\_LESSONS.md} §R7).
+
+\subsection{Devnet Deployment Anchor}
+\label{sec:onchain-deployment}
+
+The TARDUS reference program is deployed on Solana devnet for
+ongoing integration validation:
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\toprule
+Field & Value \\
+\midrule
+Program ID            & \texttt{AmY1ysgQyCC6CmorXkrNkogBSHmomy4kbsPziAYUx47u} \\
+Authority             & \texttt{5EiLNkpp3QiH1wzBEHnCdWSpxREFH2q5jje9S2gVmaMz} \\
+Loader                & \texttt{BPFLoaderUpgradeab1e11111111111111111111111}    \\
+Network               & devnet (\texttt{https://api.devnet.solana.com}) \\
+Binary size           & $200\,\mathrm{KiB}$ ELF (\texttt{target/deploy/tardus\_program.so}) \\
+Rent-locked           & $\approx 1.40\,\mathrm{SOL}$                                \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Any party with a Solana wallet may submit \texttt{Bootstrap},
+\texttt{RegisterKeyset}, \texttt{Deposit}, \texttt{Refresh},
+\texttt{Withdraw}, or \texttt{Revoke} transactions against this
+program ID; the protocol is exercised continuously by
+\texttt{tests/devnet\_e2e.rs} (marked \texttt{\#[ignore]} for default
+\texttt{cargo test} runs, gated behind explicit \texttt{cargo test
+-{}- -{}-ignored}).
+
+\subsection{Security Invariants}
+\label{sec:onchain-security}
+
+The program enforces the following invariants at the boundary of every instruction:
+
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item \textbf{Canonical PDA}: each account argument is checked to be the canonical PDA derivable from \Cref{sec:onchain-pda}'s seeds and the program ID.
+  \item \textbf{Signer verification}: instructions that authenticate to the committee (\texttt{RegisterKeyset}, \texttt{Revoke}) check that at least $t$ valid committee transcript signatures are present.
+  \item \textbf{Vault collateral invariant}: any instruction that changes vault collateral or the active-commitment set checks the invariant pre- and post-execution.
+  \item \textbf{Strict deserialization with padding tolerance}: instruction data is parsed via Borsh \texttt{try\_from\_slice} (which rejects trailing bytes); account-data deserialization uses \texttt{BorshDeserialize::deserialize\_reader} (which reads only the encoded prefix and tolerates trailing zero padding). The reader-based path was added in v1.4.5 after a real-runtime SVM bug caused account-data loads to fail when the program-owned PDA was larger than the serialised state.
+  \item \textbf{No CPI reentrancy}: the program does not recursively invoke itself; any CPI is to allow-listed external programs (Token-2022, Light account-compression).
+  \item \textbf{Sysvar conservatism}: epoch transitions are derived from the Clock sysvar but tolerated within a slot-window buffer to absorb leader slot skew.
+\end{itemize}

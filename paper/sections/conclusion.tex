@@ -1,0 +1,16 @@
+\section{Conclusion and future work}
+\label{sec:conclusion}
+
+We have shown that Chaum's 1982 blind-signature bearer cash, modernised with four decades of follow-up work and wired into Solana's native runtime, gives a payment protocol that hides senders, receivers, and the transaction graph at roughly a tenth of the on-chain cost of comparable ZK-based systems. The construction is not novel in any single layer; what we believe is new is the way the layers compose to fit a public-blockchain setting --- the bearer model that fits the on-chain stack budget, the sealed-box layer that binds to Ed25519 receiving identities, the four-layer fee-payer privacy stack with a stated linkability bound and an empirical witness.
+
+The path to a mainnet deployment runs through three open items.
+
+First, an external cryptographic audit. EasyCrypt skeletons exist for the foundational theorems (T1, T2, T4, T7); the remaining theorems are stated and informally reduced. Mechanising the remainder, and a line-by-line audit of the on-chain program, is gating any production launch.
+
+Second, the Token-2022 ConfidentialMint vault migration that turns Theorem T8 from a placeholder into a provable claim and closes the per-coin denomination leak. We have scoped the work and described it in \Cref{sec:related-conf-mint}; it is a non-trivial integration that depends on the stability of Token-2022's Confidential Transfer extension on mainnet.
+
+Third, a Light-Protocol-style compressed-Merkle-tree integration for the nullifier set, which would lift the per-vault nullifier capacity from the current low-thousands range into the billions. This is a scaling concern rather than a security one, and it does not block the initial launch.
+
+We are not in a hurry. The bearer-cash idea has been waiting forty-four years for a public smart-contract chain to land on; another six months for an external audit is, in the larger arc, time well spent.
+
+\paragraph{Acknowledgements.} The construction owes its individual layers to the cited authors. Errors in their composition are entirely the author's.

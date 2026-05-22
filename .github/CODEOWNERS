@@ -1,0 +1,65 @@
+# CODEOWNERS — Tardus Monorepo
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# NOTE: GitHub Teams require a paid plan. This file uses individual GitHub usernames.
+# Replace @nzengi with the actual GitHub username(s) of each maintainer/reviewer.
+# Add multiple reviewers by space-separating: @user1 @user2
+
+# ── Default: repo owner reviews everything ──────────────────────────────────
+*                                   @nzengi
+
+# ── Cryptographic core ───────────────────────────────────────────────────────
+# Any change here requires a cryptographer sign-off
+# Add external crypto reviewer usernames here when onboarded
+crates/tardus-core/                 @nzengi
+crates/tardus-mint/                 @nzengi
+crates/tardus-refresh/              @nzengi
+
+# ── Formal proofs & specification ────────────────────────────────────────────
+proofs/                             @nzengi
+spec/                               @nzengi
+paper/                              @nzengi
+
+# ── Solana on-chain program ──────────────────────────────────────────────────
+# Changes here require Solana security audit review before merge
+crates/tardus-program/              @nzengi
+
+# ── Validator & relay ────────────────────────────────────────────────────────
+crates/tardus-validator/            @nzengi
+crates/tardus-relay/                @nzengi
+
+# ── Client library ───────────────────────────────────────────────────────────
+crates/tardus-client/               @nzengi
+
+# ── Wallet & GUI ─────────────────────────────────────────────────────────────
+crates/tardus-wallet/               @nzengi
+crates/tardus-wallet-gui/           @nzengi
+
+# ── CLI ──────────────────────────────────────────────────────────────────────
+crates/tardus-cli/                  @nzengi
+
+# ── TypeScript SDK ───────────────────────────────────────────────────────────
+ts-sdk/                             @nzengi
+
+# ── Web frontend ─────────────────────────────────────────────────────────────
+web/                                @nzengi
+
+# ── Deployment & infrastructure ──────────────────────────────────────────────
+# NOTE: Sensitive runbooks live in tardus-infra (private repo)
+deploy/                             @nzengi
+
+# ── CI / GitHub Actions ──────────────────────────────────────────────────────
+.github/                            @nzengi
+.github/workflows/                  @nzengi
+
+# ── Security & audit ─────────────────────────────────────────────────────────
+SECURITY.md                         @nzengi
+audit/                              @nzengi
+
+# ── Dependency management ────────────────────────────────────────────────────
+Cargo.toml                          @nzengi
+Cargo.lock                          @nzengi
+deny.toml                           @nzengi
+rust-toolchain.toml                 @nzengi
+ts-sdk/package.json                 @nzengi
+ts-sdk/package-lock.json            @nzengi

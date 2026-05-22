@@ -1,0 +1,59 @@
+name: supply-chain
+
+# Yulia Demidov caveat (Komite 2, 2026-05-22).
+# Runs cargo-audit (CVE feed) and cargo-deny (licenses + bans + advisories).
+# Both gated on the committed deny.toml and .cargo/audit.toml — ignores are
+# documented and limited to transitive Solana SDK 2.3.x deps.
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**/Cargo.toml'
+      - 'deny.toml'
+      - '.cargo/audit.toml'
+      - '.github/workflows/supply-chain.yml'
+  schedule:
+    # Weekly catch — advisory database changes upstream even when our
+    # Cargo.lock does not.
+    - cron: '17 9 * * 1'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.85'
+
+      - name: install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: cargo audit
+        run: cargo audit
+
+  deny:
+    name: cargo deny check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.85'
+
+      - name: install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: cargo deny check
+        run: cargo deny check

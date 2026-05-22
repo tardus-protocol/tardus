@@ -1,0 +1,146 @@
+% ============================================================
+% TARDUS Protocol Specification
+% Phase 0 — Version 0.1
+% ============================================================
+\documentclass[11pt,letterpaper]{article}
+
+% --- packages ---
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{amsmath, amsthm, amssymb, amsfonts}
+\usepackage{mathtools}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{listings}
+\usepackage{tikz}
+\usepackage{fancyhdr}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  citecolor=green!50!black,
+  urlcolor=blue!70!black,
+  pdftitle={TARDUS Protocol Specification},
+  pdfauthor={TARDUS Architecture Committee},
+  pdfsubject={Fully private payment protocol on the Solana main chain},
+  pdfkeywords={Solana, blind signature, threshold, privacy, Chaum, refresh}
+}
+
+% --- bibliography ---
+\bibliographystyle{plain}
+
+% --- theorem environments ---
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{example}[theorem]{Example}
+\newtheorem{construction}[theorem]{Construction}
+
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+\newtheorem*{notation}{Notation}
+
+% cleveref name aliases (so \Cref recognises our theorem-like environments)
+\crefname{theorem}{Theorem}{Theorems}
+\crefname{lemma}{Lemma}{Lemmas}
+\crefname{proposition}{Proposition}{Propositions}
+\crefname{corollary}{Corollary}{Corollaries}
+\crefname{definition}{Definition}{Definitions}
+\crefname{construction}{Construction}{Constructions}
+\crefname{example}{Example}{Examples}
+\crefname{remark}{Remark}{Remarks}
+
+% --- notation macros ---
+\newcommand{\negl}{\mathsf{negl}}
+\newcommand{\poly}{\mathsf{poly}}
+\newcommand{\ROM}{\mathsf{ROM}}
+\newcommand{\Adv}{\mathcal{A}}
+\newcommand{\Sim}{\mathcal{S}}
+\newcommand{\AdvG}[1]{\mathsf{Game}_{#1}}
+
+% TARDUS-specific
+\newcommand{\Mint}{\mathsf{Mint}}
+\newcommand{\Coin}{\mathsf{Coin}}
+\newcommand{\Refresh}{\mathsf{Refresh}}
+\newcommand{\Spend}{\mathsf{Spend}}
+\newcommand{\Vault}{\mathsf{Vault}}
+\newcommand{\Commit}{\mathsf{Commit}}
+\newcommand{\Nullifier}{\mathsf{Nullifier}}
+\newcommand{\Denom}{\mathsf{Denom}}
+\newcommand{\Keyset}{\mathsf{Keyset}}
+\newcommand{\Epoch}{\mathsf{Epoch}}
+
+% --- title ---
+\title{
+  \vspace{-2em}
+  \Huge\textbf{TARDUS} \\[0.8em]
+  \Large A Fully Private Payment Protocol \\[0.3em] on Solana --- Specification \\[1.2em]
+  \normalsize Phase 0 --- Version 0.1 (draft)
+}
+\author{
+  TARDUS Architecture Committee \\
+  \texttt{nzengi}
+}
+\date{2026-05-20}
+
+% --- page style ---
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\small TARDUS Spec v0.1}
+\lhead{\small\leftmark}
+\rfoot{\small\thepage}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+
+\begin{abstract}
+\noindent
+TARDUS is a fully private bearer payment protocol on the Solana main chain. It hides the sender, the receiver, the amount, and the asset type. It uses neither zero-knowledge proofs, nor pairing-based cryptography, nor per-circuit trusted setup. Instead, it builds on David Chaum's 1982 blind-signature bearer cash, fused with the operational hygiene of the 2020s: threshold blind Schnorr signatures (\cite{stinson-strobl2001} and \cite{komlo-goldberg2020}), a $\kappa$-fold cut-and-choose refresh protocol (\cite{dold2019}), a mint committee with mandatory FIPS 140-2 Level 3 HSMs, proactive secret-sharing rotation (\cite{gennaro-jarecki-krawczyk-rabin1999}), and a transparent collateral vault on top of Solana Token-2022. Computational unforgeability follows from the Pointcheval-Stern (\cite{pointcheval-stern1996}) random-oracle reduction; statistical blindness holds at issuance; double-spend resistance follows from an on-chain mathematical collateral invariant. This document is the Phase 0 specification; it serves as the foundation for the Phase 1 reference implementation, Phase 2-3 operations and wallet, Phase 4 audit and formal verification, and Phase 5 mainnet deployment.
+\end{abstract}
+
+\vspace{1em}
+
+\begin{center}
+\fbox{\parbox{0.9\textwidth}{\small
+\textbf{License:} This spec and all accompanying artifacts are released under TARDUS-PROPRIETARY-1.0. Visibility is for reference only; copying, derivation, redistribution, and AI training/inference are prohibited. See the \texttt{LICENSE} file at the repository root.
+}}
+\end{center}
+
+\vspace{1em}
+
+\tableofcontents
+
+\newpage
+
+% --- sections ---
+\input{sections/01-introduction}
+\input{sections/02-crypto-primitives}
+\input{sections/03-protocol-mint}
+\input{sections/04-protocol-refresh}
+\input{sections/05-onchain-program}
+\input{sections/06-wallet}
+\input{sections/07-security}
+\input{sections/08-failure-modes}
+\input{sections/09-relay}
+
+% --- appendix ---
+\input{sections/A-reference-vectors}
+
+% --- bibliography ---
+\newpage
+\bibliography{refs}
+
+\end{document}

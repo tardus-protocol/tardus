@@ -1,0 +1,47 @@
+name: ts-sdk-tests
+
+# TypeScript SDK build + test. Light + fast (Node native test
+# runner, no jest/vitest dep).
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'ts-sdk/**'
+      - '.github/workflows/ts-sdk-tests.yml'
+  pull_request:
+    paths:
+      - 'ts-sdk/**'
+
+jobs:
+  build-and-test:
+    name: typecheck + node:test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          # No registry cache — npm-install on each run; install
+          # cost is small (4 deps, no compile).
+
+      - name: npm install
+        working-directory: ts-sdk
+        run: npm install --no-audit --no-fund
+
+      - name: tsc --noEmit (typecheck)
+        working-directory: ts-sdk
+        run: npm run typecheck
+
+      - name: node --test (sealed-box + mnemonic + invoice + v0.2 + Rust↔TS cross-lang)
+        # `npm test` runs `node --test --experimental-strip-types test/*.test.ts`
+        # which covers all 5 test files (32 tests total), including the
+        # Rust↔TS cross-language wire-format compatibility vector at
+        # test/rust-cross-language.test.ts (proves TS v0.2's unclamped
+        # Curve25519 Montgomery ladder produces byte-equal output with
+        # the Rust reference via the canonical BIP-39 vector).
+        working-directory: ts-sdk
+        run: npm test

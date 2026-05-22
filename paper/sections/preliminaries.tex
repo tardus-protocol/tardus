@@ -1,0 +1,28 @@
+\section{Preliminaries}
+\label{sec:prelim}
+
+We assume the reader is familiar with elliptic-curve cryptography, the Schnorr signature, and the basics of Solana's programming model (program-derived addresses, the SBF runtime, the ed25519 precompile). We fix notation here only for the pieces that the rest of the paper uses without further introduction.
+
+\subsection{Curves and groups}
+
+All scalar arithmetic is done modulo $\ell = 2^{252} + 27742317777372353535851937790883648493$, the order of the Ed25519 prime-order subgroup. We write $G$ for the Ed25519 base point and $G_M$ for the Curve25519 Montgomery base point (the $u$-coordinate $9$). The birational map between Edwards and Montgomery forms~\cite{rfc7748} lets us derive an X25519 public key from an Ed25519 one: $pk^{(M)} = \operatorname{toMontgomery}(pk^{(E)})$. We use this exactly once, to feed an Ed25519 receiving identity into the sealed-box ECDH.
+
+\subsection{Threshold blind Schnorr}
+
+A blind Schnorr signature, after Pointcheval--Stern~\cite{pointchevalstern1996}, lets a signer issue a signature on a message $m$ chosen by the user without learning $m$ or being able to link the issuance protocol to the resulting $(R, s)$. The threshold variant, due to Stinson and Strobl~\cite{stinsonstrobl2001}, lifts this to an $n$-of-$n$ committee: the user blinds, every committee member contributes a partial blind signature, the user unblinds to a single Schnorr signature under the joint public key. We use $n = 3$ in our reference implementation; the protocol generalises to arbitrary $n$ and to thresholds $t < n$ at the cost of an FROST-style aggregation step~\cite{komlogoldberg2020}.
+
+\subsection{Distributed key generation}
+
+The joint public key $pk_{\mathrm{joint}}$ is produced by a Komlo--Goldberg style DKG~\cite{komlogoldberg2020}: each committee member commits to a polynomial, broadcasts the commitments, distributes shares pairwise, verifies the shares against the commitments, and aggregates. We add a dual-commitment Joint-Feldman-Pedersen check (the "discovery \#2" of our specification) to detect biased coin tosses; the standard Feldman check is insufficient against a rushing adversary that picks its share to match the others'.
+
+\subsection{Cut-and-choose refresh}
+
+A user holding one coin of denomination $D$ wants to split it into a smaller coin of value $D'$ and an anonymous change coin of value $D - D'$. The naive blind-issuance approach lets the user mint two coins for the price of one. Dold's GNU Taler thesis~\cite{dold2019} resolves this with a $\kappa$-fold cut-and-choose: the user commits to $\kappa + 1$ candidate coin pairs, the validators open $\kappa$ at random and verify they sum to $D$, and only the unopened pair is blind-signed. The cheating probability is bounded by $1/(\kappa + 1)$ per attempt. We use $\kappa = 32$ as default, which gives a per-attempt cheating bound of about $3\%$; combined with the on-chain rejection of double-spends, the long-run honest-validator advantage is overwhelming.
+
+\subsection{HKDF and AEAD}
+
+The Krawczyk HKDF construction~\cite{krawczyk2010} extracts a uniform secret from a Diffie--Hellman shared value and expands it into key material. We use HKDF-SHA-256 throughout the sealed-box layer and HKDF-SHA-512 for the receiving-identity derivation from the BIP-39 master seed; the wider output of SHA-512 lets us reduce 64 bytes modulo $\ell$ to get a uniform scalar without rejection sampling. The AEAD scheme is ChaCha20-Poly1305~\cite{rfc7539}, chosen because it has a constant-time pure-software implementation that we can ship in both Rust and the browser without depending on hardware acceleration.
+
+\subsection{Solana-specific machinery}
+
+A program-derived address (PDA) is a Solana account address that no private key controls but that the program can sign for via \texttt{invoke\_signed}. PDAs are how we hold the on-chain registry of active keysets, the nullifier set, the per-denomination vault, and the sponsor pool. The ed25519 program is a precompile at a fixed address that verifies an Ed25519 signature without the caller having to do the elliptic-curve arithmetic in SBF; for us this is critical, since \texttt{curve25519-dalek} blows the 4\,KB SBF stack budget when called directly. Compute units (CU) are Solana's metering currency; a transaction has 1.4\,M CU available, and our largest instruction (\texttt{Withdraw}) measures at about 77\,k.

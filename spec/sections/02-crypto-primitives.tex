@@ -1,0 +1,189 @@
+\section{Cryptographic Primitives}
+\label{sec:primitives}
+
+This section establishes the cryptographic primitives, notation, and security assumptions underlying TARDUS. All subsequent protocols (\Cref{sec:mint,sec:refresh,sec:onchain}) reference the definitions and constructions introduced here.
+
+\subsection{Notation}
+
+We write $\lambda \in \mathbb{N}$ for the security parameter (default $\lambda = 128$ for TARDUS v1). A function $f \colon \mathbb{N} \to [0,1]$ is \emph{negligible}, written $f(\lambda) = \negl(\lambda)$, if for every polynomial $p$ there exists $\lambda_0$ such that for all $\lambda \geq \lambda_0$, $f(\lambda) < 1/p(\lambda)$.
+
+Probabilistic polynomial-time is abbreviated \emph{PPT}. We write $x \leftarrow_\$ X$ to denote sampling $x$ uniformly at random from a set $X$, and $y \leftarrow A(x)$ to denote running an algorithm $A$ on input $x$ and assigning the output to $y$. We use $[n] = \{1, 2, \ldots, n\}$.
+
+\subsection{Elliptic-Curve Group}
+\label{sec:group}
+
+TARDUS operates over the prime-order subgroup of the Edwards curve \texttt{edwards25519}, the group used by Ed25519. We denote:
+
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item $\mathbb{G}$: the prime-order subgroup, of order $\ell = 2^{252} + 27742317777372353535851937790883648493$.
+  \item $G \in \mathbb{G}$: the standard base point of \texttt{edwards25519}.
+  \item $\mathbb{F}_\ell$: the scalar field, integers modulo $\ell$.
+\end{itemize}
+
+We assume the \emph{Elliptic-Curve Discrete Logarithm Problem (ECDLP)} is hard in $\mathbb{G}$: for any PPT adversary $\Adv$,
+\[
+  \Pr\!\bigl[\, x \leftarrow_\$ \mathbb{F}_\ell;\; X \gets xG;\; x' \leftarrow \Adv(\mathbb{G}, G, X) \;:\; x' = x \,\bigr] = \negl(\lambda).
+\]
+This assumption underlies every signature unforgeability claim in TARDUS.
+
+\subsection{Hash Functions and the Random Oracle Model}
+\label{sec:hash}
+
+TARDUS uses two concrete hash functions, each with a distinct purpose:
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item SHA-256~\cite{nist-sp800-185} for keyset identifiers, commitment binding, and any context whose output is consumed as bytes (not as a scalar).
+  \item SHA-512~\cite{nist-sp800-185} for the hash-to-scalar map $H_{\mathbb{F}_\ell}$ used in Schnorr challenges (\Cref{con:schnorr,con:blind-schnorr,con:threshold-schnorr,con:blind-threshold}).
+\end{itemize}
+
+For security analysis we model both as \emph{random oracles} (the ROM, following~\cite{pointcheval-stern1996}).
+
+The hash-to-scalar map $H_{\mathbb{F}_\ell} \colon \{0,1\}^* \to \mathbb{F}_\ell$ is realised by SHA-512 reduced modulo $\ell$. The reduction bias is bounded by $\ell / 2^{512} \approx 2^{252} / 2^{512} = 2^{-260}$, which is negligible. A naive 256-bit hash reduced modulo $\ell$ would carry a bias of $\approx 2^{-4} \approx 6\%$ and is therefore \emph{not} used for scalar derivation anywhere in the protocol.
+
+\subsection{Schnorr Signatures}
+\label{sec:schnorr}
+
+The Schnorr signature scheme~\cite{schnorr1991} over $\mathbb{G}$ is parameterised by $(\mathbb{G}, G, \ell, H_{\mathbb{F}_\ell})$.
+
+\begin{construction}[Schnorr signature]
+\label{con:schnorr}
+\begin{description}[leftmargin=1.5em,style=nextline,itemsep=0.2em]
+  \item[$\mathsf{KeyGen}(1^\lambda)$:] Sample $sk \leftarrow_\$ \mathbb{F}_\ell$; compute $pk \gets sk \cdot G$; return $(pk, sk)$.
+  \item[$\mathsf{Sign}(sk, m)$:] Sample $k \leftarrow_\$ \mathbb{F}_\ell$; compute $R \gets kG$;
+    \[ c \gets H_{\mathbb{F}_\ell}(R \,\|\, pk \,\|\, m), \quad s \gets k + c \cdot sk \pmod{\ell}. \]
+    Return $\sigma = (R, s)$.
+  \item[$\mathsf{Verify}(pk, m, \sigma = (R, s))$:] Compute $c \gets H_{\mathbb{F}_\ell}(R \,\|\, pk \,\|\, m)$; return $\mathbf{1}[\,sG = R + c \cdot pk\,]$.
+\end{description}
+\end{construction}
+
+\begin{theorem}[Pointcheval-Stern, informal]
+\label{thm:schnorr-euf}
+Schnorr signatures are existentially unforgeable under chosen-message attack in the random-oracle model, by reduction to ECDLP via the forking lemma~\cite{pointcheval-stern1996}.
+\end{theorem}
+
+\subsection{Blind Schnorr Signatures}
+\label{sec:blind-schnorr}
+
+The blind variant allows a signer to issue a signature on a message $m$ without learning $m$, the resulting signature, or the link between issuance and unblinding.
+
+\begin{construction}[Blind Schnorr signature]
+\label{con:blind-schnorr}
+The blind issuance protocol between user $U$ (who knows $m$) and signer $S$ (who holds $sk$ with public key $pk = sk \cdot G$):
+\begin{enumerate}[leftmargin=2em,itemsep=0.2em]
+  \item $S$: sample $k \leftarrow_\$ \mathbb{F}_\ell$; compute $R \gets kG$; send $R$ to $U$.
+  \item $U$: sample $\alpha, \beta \leftarrow_\$ \mathbb{F}_\ell$; compute
+    \[
+      R' \gets R + \alpha G + \beta \cdot pk, \quad
+      c' \gets H_{\mathbb{F}_\ell}(R' \,\|\, pk \,\|\, m), \quad
+      c \gets c' + \beta \pmod{\ell}.
+    \]
+    Send $c$ to $S$.
+  \item $S$: compute $s \gets k + c \cdot sk \pmod{\ell}$; send $s$ to $U$.
+  \item $U$: compute $s' \gets s + \alpha \pmod{\ell}$; output $\sigma' = (R', s')$ as the unblinded signature on $m$.
+\end{enumerate}
+\end{construction}
+
+A direct calculation shows $s' G = R' + c' \cdot pk$, so $\sigma'$ is a valid Schnorr signature on $m$ under $pk$ in the sense of~\Cref{con:schnorr}.
+
+\begin{theorem}[Statistical blindness]
+\label{thm:blindness}
+For every (possibly malicious) PPT signer $S^*$, the joint distribution of issuance transcripts $(R, c, s)$ observed by $S^*$ is statistically independent of the unblinded signature $(R', s', m)$. The unblinding factors $(\alpha, \beta)$ are uniform in $\mathbb{F}_\ell^2$, inducing a uniform marginal over all possible $m$ consistent with the transcript.
+\end{theorem}
+
+\begin{theorem}[One-more unforgeability~\cite{pointcheval-stern1996}]
+\label{thm:bs-unforgeability}
+If $\Adv$ makes $q$ valid blind-issuance queries, the probability that $\Adv$ outputs $q+1$ valid distinct $(m, \sigma')$ pairs is bounded by $q \cdot \mathsf{Adv}^{\mathsf{ECDLP}}_{\mathcal{B}}(\lambda) + \negl(\lambda)$ for some PPT reduction $\mathcal{B}$ in the ROM.
+\end{theorem}
+
+\subsection{Pedersen Verifiable Secret Sharing}
+\label{sec:vss}
+
+For threshold key generation, TARDUS uses Pedersen's non-interactive VSS~\cite{pedersen1991}, which provides information-theoretic hiding of the secret while allowing public verification of share consistency.
+
+\begin{construction}[Pedersen VSS]
+\label{con:vss}
+Given $\mathbb{G}$ with generator $G$ and an independent generator $H$ (with $\log_G H$ unknown), a dealer with secret $s \in \mathbb{F}_\ell$ shares $s$ among $n$ parties with threshold $t$:
+\begin{enumerate}[leftmargin=2em,itemsep=0.2em]
+  \item Sample $f(x) = s + a_1 x + \cdots + a_{t-1} x^{t-1}$, where $a_i \leftarrow_\$ \mathbb{F}_\ell$.
+  \item Sample $g(x) = r + b_1 x + \cdots + b_{t-1} x^{t-1}$, where $r, b_i \leftarrow_\$ \mathbb{F}_\ell$.
+  \item Publish commitments $C_i = a_i G + b_i H$ for $i = 0, \ldots, t-1$ (with $a_0 = s, b_0 = r$).
+  \item Send share $(s_j, r_j) = (f(j), g(j))$ privately to party $j$.
+\end{enumerate}
+Party $j$ verifies by checking $s_j G + r_j H = \sum_{i=0}^{t-1} j^i C_i$.
+\end{construction}
+
+This scheme provides \emph{binding} (the dealer cannot equivocate on $s$ after publishing the $C_i$) under the discrete-log assumption, and \emph{statistical hiding} (any set of fewer than $t$ shares reveals no information about $s$).
+
+\subsection{Distributed Key Generation}
+\label{sec:dkg}
+
+TARDUS bootstraps the threshold mint key via a DKG ceremony following Gennaro et al.~\cite{gennaro-jarecki-krawczyk-rabin1999} with the round-optimisation of Komlo-Goldberg~\cite{komlo-goldberg2020}.
+
+\begin{construction}[FROST-style DKG, simplified]
+\label{con:dkg}
+For $n$ participants with threshold $t$:
+\begin{enumerate}[leftmargin=2em,itemsep=0.2em]
+  \item Each participant $P_i$ acts as a Pedersen-VSS dealer for a freshly sampled secret $s_i \leftarrow_\$ \mathbb{F}_\ell$.
+  \item Each $P_i$ broadcasts a Schnorr proof of knowledge of $s_i$ against the commitment $C_0^{(i)} = s_i G$.
+  \item All commitments and proofs are gossiped; participants verify each other's commitments and proofs.
+  \item Each $P_i$ aggregates the received shares: $sk_i = \sum_{j=1}^{n} s_{j \to i}$.
+  \item The joint public key is $PK = \sum_{j=1}^{n} C_0^{(j)} = \bigl( \sum_{j=1}^{n} s_j \bigr) G$.
+\end{enumerate}
+The joint secret key is $SK = \sum_{j=1}^{n} s_j$, distributed across the $n$ participants as Shamir shares with threshold $t$.
+\end{construction}
+
+TARDUS adopts $n = 30$, $t = 14$ as the canonical committee size (\Cref{sec:mint}).
+
+\subsection{Threshold Schnorr Signatures (Stinson-Strobl)}
+\label{sec:threshold-schnorr}
+
+Given a DKG-shared key, $t$ of $n$ participants can jointly produce a Schnorr signature on $m$ without ever reconstructing $SK$.
+
+\begin{construction}[Threshold Schnorr~\cite{stinson-strobl2001}, simplified]
+\label{con:threshold-schnorr}
+For a signing set $S \subseteq [n]$ of size $|S| = t$:
+\begin{enumerate}[leftmargin=2em,itemsep=0.2em]
+  \item Each $P_i$ for $i \in S$ samples $k_i \leftarrow_\$ \mathbb{F}_\ell$, computes $R_i \gets k_i G$, broadcasts $R_i$.
+  \item Aggregate: $R \gets \sum_{i \in S} R_i$.
+  \item Challenge: $c \gets H_{\mathbb{F}_\ell}(R \,\|\, PK \,\|\, m)$.
+  \item Each $P_i$ computes its partial signature $s_i \gets k_i + c \cdot \lambda_i^{(S)} \cdot sk_i \pmod{\ell}$, where $\lambda_i^{(S)}$ is the Lagrange coefficient of $i$ relative to $S$.
+  \item Aggregate: $s \gets \sum_{i \in S} s_i$.
+  \item Output $\sigma = (R, s)$, verifiable as a standard Schnorr signature under $PK$ via~\Cref{con:schnorr}.
+\end{enumerate}
+\end{construction}
+
+\begin{theorem}[\cite{stinson-strobl2001}, informal]
+\label{thm:threshold-euf}
+The threshold Schnorr scheme of~\Cref{con:threshold-schnorr} is unforgeable against a static adversary corrupting fewer than $t$ participants, by reduction to ECDLP in the ROM, provided the underlying VSS is secure.
+\end{theorem}
+
+\subsection{Blind Threshold Schnorr --- the TARDUS Construction}
+\label{sec:blind-threshold}
+
+TARDUS composes blind issuance (\Cref{con:blind-schnorr}) with threshold signing (\Cref{con:threshold-schnorr}). The user blinds against the joint public key $PK$; the $t$-of-$n$ committee collaboratively produces a blind threshold signature; the user unblinds.
+
+\begin{construction}[Blind threshold Schnorr]
+\label{con:blind-threshold}
+For a committee with joint key $PK$, threshold $t$, and signing set $S$ of size $t$:
+\begin{enumerate}[leftmargin=2em,itemsep=0.2em]
+  \item Each $P_i$ samples $k_i \leftarrow_\$ \mathbb{F}_\ell$ and broadcasts $R_i \gets k_i G$. The committee aggregates $R \gets \sum_{i \in S} R_i$ and sends $R$ to the user.
+  \item User: sample $\alpha, \beta \leftarrow_\$ \mathbb{F}_\ell$; compute
+    \[
+      R' \gets R + \alpha G + \beta \cdot PK, \quad
+      c' \gets H_{\mathbb{F}_\ell}(R' \,\|\, PK \,\|\, m), \quad
+      c \gets c' + \beta \pmod{\ell}.
+    \]
+    Send $c$ to the committee.
+  \item Each $P_i$ computes $s_i \gets k_i + c \cdot \lambda_i^{(S)} \cdot sk_i \pmod{\ell}$ and broadcasts.
+  \item Aggregate: $s \gets \sum_{i \in S} s_i$; send $s$ to the user.
+  \item User: $s' \gets s + \alpha \pmod{\ell}$; output $\sigma' = (R', s')$.
+\end{enumerate}
+\end{construction}
+
+Correctness follows by combining the linearity arguments of~\Cref{con:blind-schnorr} and~\Cref{con:threshold-schnorr}. Security is the subject of~\Cref{sec:security} (theorems T1 and T2); the formal proofs are placeholders in \texttt{proofs/unforgeability.ec} and \texttt{proofs/blindness.ec} pending mechanisation in Phase~4.
+
+\subsection{Solana Cryptographic Syscall Surface}
+\label{sec:syscalls}
+
+The on-chain program of~\Cref{sec:onchain} verifies signatures using the Solana \texttt{ed25519} signature verification path, which costs approximately 5\,000 compute units per signature verification. Hashing is performed via \texttt{sol\_sha256} (approximately 85\,CU per call) and, where state-tree compatibility requires it, \texttt{sol\_poseidon} (Light Protocol's BN254 Poseidon). TARDUS deliberately avoids the \texttt{alt\_bn128} pairing syscall, as no pairing-based primitive is used by the protocol; the only place a pairing-using algorithm appears anywhere in the stack is inside Light Protocol's validity-proof verifier for compressed accounts, which TARDUS depends on transitively (\Cref{sec:onchain}).
+
+A per-instruction CU budget table appears in~\Cref{sec:onchain}.

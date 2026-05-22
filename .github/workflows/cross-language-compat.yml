@@ -1,0 +1,116 @@
+name: cross-language-compat
+
+# Rust ↔ TS wire-format drift detector. Runs on any push that
+# touches the wallet crate or the TypeScript SDK. Catches:
+#
+#   1. Rust `derive_master_seed` / `derive_receiving_keypair`
+#      output drift (HKDF salt / info / mod-ℓ reduction change).
+#   2. Rust `sealed_box::seal` wire format drift (ephemeral key
+#      offset, HKDF key/nonce derivation, ChaCha20-Poly1305 AEAD
+#      parameter change).
+#   3. TS `mnemonic-rust-compat.ts` / `sealed-box-rust-compat.ts`
+#      / `montgomery.ts` drift (clamping reintroduced, ladder
+#      arithmetic mistake, base point change).
+#
+# Mechanism: Rust example emits canonical vectors as JSON; CI
+# parses + asserts the deterministic fields; the dynamic
+# sealed_box field (varies per run due to random ephemeral key)
+# is fed to TS, which decrypts + asserts plaintext recovery.
+
+on:
+  push:
+    branches: ['**']
+    paths:
+      - 'crates/tardus-wallet/**'
+      - 'ts-sdk/**'
+      - 'crates/tardus-core/**'
+      - 'crates/tardus-client/**'
+      - '.github/workflows/cross-language-compat.yml'
+  pull_request:
+    paths:
+      - 'crates/tardus-wallet/**'
+      - 'ts-sdk/**'
+      - 'crates/tardus-core/**'
+      - 'crates/tardus-client/**'
+
+# Expected deterministic values (from the canonical BIP-39 test
+# mnemonic; locked into the audit firm's reference vector set).
+env:
+  EXPECTED_MASTER_SEED: '5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc1'
+  EXPECTED_RECV_SK:     'b4fecd6839630d54e244174662dea70ad376b89d0dbbf26756f173d4924bb60c'
+  EXPECTED_RECV_PK:     'be7a337ae6b05629e16ca56161973a95687be0afb6cf6b2ab4f0c23935855614'
+
+jobs:
+  cross-language:
+    name: Rust example → TS decrypt (drift detector)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.85'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cross-lang
+
+      - name: install Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: install jq (JSON parser)
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: build + run Rust vector generator
+        run: |
+          cargo run -p tardus-wallet \
+            --example cross_language_vectors --release \
+            > ts-sdk/test/fixtures/rust-vectors.json
+          echo "::group::generated vector"
+          cat ts-sdk/test/fixtures/rust-vectors.json
+          echo "::endgroup::"
+
+      - name: assert deterministic fields match canonical expected
+        run: |
+          set -euo pipefail
+          MASTER=$(jq -r '.master_seed_hex' ts-sdk/test/fixtures/rust-vectors.json)
+          RECV_SK=$(jq -r '.recv_sk_hex' ts-sdk/test/fixtures/rust-vectors.json)
+          RECV_PK=$(jq -r '.recv_pk_hex' ts-sdk/test/fixtures/rust-vectors.json)
+
+          if [ "$MASTER" != "$EXPECTED_MASTER_SEED" ]; then
+            echo "::error::DRIFT: master_seed_hex mismatch"
+            echo "  got:      $MASTER"
+            echo "  expected: $EXPECTED_MASTER_SEED"
+            exit 1
+          fi
+          if [ "$RECV_SK" != "$EXPECTED_RECV_SK" ]; then
+            echo "::error::DRIFT: recv_sk_hex mismatch — Rust derive_receiving_keypair changed semantics"
+            echo "  got:      $RECV_SK"
+            echo "  expected: $EXPECTED_RECV_SK"
+            exit 1
+          fi
+          if [ "$RECV_PK" != "$EXPECTED_RECV_PK" ]; then
+            echo "::error::DRIFT: recv_pk_hex mismatch"
+            echo "  got:      $RECV_PK"
+            echo "  expected: $EXPECTED_RECV_PK"
+            exit 1
+          fi
+          echo "::notice::Rust deterministic vectors match canonical expected (master_seed / recv_sk / recv_pk)"
+
+      - name: TS install + decrypt fresh Rust ciphertext
+        working-directory: ts-sdk
+        run: |
+          npm install --no-audit --no-fund
+          npm run typecheck
+          # Run JUST the fixture test (which reads the freshly
+          # generated rust-vectors.json) to confirm TS can decrypt
+          # the Rust output bit-for-bit.
+          node --test --experimental-strip-types test/rust-fixture.test.ts
+
+      - name: TS full suite (sanity)
+        working-directory: ts-sdk
+        run: npm test

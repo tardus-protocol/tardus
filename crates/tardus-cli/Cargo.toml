@@ -1,0 +1,38 @@
+[package]
+name              = "tardus-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license-file.workspace = true
+publish.workspace = true
+description       = "TARDUS command-line tools: invoice, coin verification, DKG and lifecycle simulation."
+
+[[bin]]
+name = "tardus"
+path = "src/main.rs"
+
+[dependencies]
+tardus-core    = { path = "../tardus-core" }
+tardus-mint    = { path = "../tardus-mint" }
+tardus-refresh = { path = "../tardus-refresh" }
+tardus-client  = { path = "../tardus-client" }
+tardus-program = { path = "../tardus-program", features = ["no-entrypoint"] }
+tardus-wallet  = { path = "../tardus-wallet" }
+clap           = { version = "4", features = ["derive"] }
+hex            = "0.4"
+rand           = "0.8"
+anyhow         = "1"
+borsh          = "1"
+solana-client  = "2"
+solana-sdk     = "2"
+tokio          = { version = "1", features = ["rt", "macros"] }
+reqwest        = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "json"] }
+serde          = { version = "1", features = ["derive"] }
+serde_json     = "1"
+tempfile       = "3"
+
+[dev-dependencies]
+
+[lints]
+workspace = true

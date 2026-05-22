@@ -1,0 +1,8 @@
+{
+  "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+  "master_seed_hex":  "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc1",
+  "recv_sk_hex":      "b4fecd6839630d54e244174662dea70ad376b89d0dbbf26756f173d4924bb60c",
+  "recv_pk_hex":      "be7a337ae6b05629e16ca56161973a95687be0afb6cf6b2ab4f0c23935855614",
+  "plaintext_hex":    "7461726475732063726f73732d6c616e6775616765207465737420766563746f72207631",
+  "sealed_box_hex":   "685e6b7d58abd45cba57667be39e0cdedaaad5ee0026337bd5216ffb16c5ca162ccd9a58d18f12c952992d24cbf3e7e5fc2cbaee065b1bc6565a6a2ea60e20e0c9718f2ac961d20dfeac306a0e7af61daa714c66"
+}

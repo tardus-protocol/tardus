@@ -1,0 +1,601 @@
+\section{Security Model and Theorems}
+\label{sec:security}
+
+This section formalises the adversary model, lists the cryptographic and
+system assumptions on which TARDUS rests, and states the six main theorems
+together with reduction sketches. Full proof mechanisation is deferred to
+Phase 4 (EasyCrypt); the proof sketches given here are sufficient to guide
+that work and to serve as the audit baseline.
+
+\subsection{Threat Model}
+\label{sec:threat-model}
+
+\paragraph{Adversary classes.} TARDUS considers four overlapping adversary
+classes; each theorem in this section specifies which subset it tolerates.
+
+\begin{description}[leftmargin=2em,style=nextline]
+  \item[$\Adv_{\mathsf{net}}$ (passive observer)]
+    Sees every on-chain transaction, all relay traffic between the user and
+    the mint committee, and the contents of the public registries
+    (\S5). Cannot inject, drop, or alter messages. This is
+    the strictly weakest model.
+  \item[$\Adv_{\mathsf{user}}$ (malicious user)]
+    A polynomial-time party that controls one or more user identities, can
+    interact with the mint committee through the canonical protocols
+    (\S3 and \S4), and can submit arbitrary
+    transactions to the on-chain program. Adaptive: may corrupt mint
+    operators after seeing earlier transcripts.
+  \item[$\Adv_{\mathsf{mint},t-1}$ (corrupted mint minority)]
+    Statically corrupts up to $t-1$ of the $n$ mint operators (where $t$ is
+    the signing threshold). Sees all corrupted operators' shares, internal
+    state, and HSM-mediated traffic. Honest operators communicate over
+    authenticated channels with replay protection. This is the maximum
+    corruption tolerated by all positive results below; at $t$ corruptions
+    coin forgery becomes possible by reconstruction.
+  \item[$\Adv_{\mathsf{chain}}$ (network-level adversary)]
+    Controls the Solana network up to but not including consensus
+    (cf.\ Solana's $1/3$ honest-stake assumption). Can reorder
+    transactions within a slot, drop unsubmitted transactions, and observe
+    all account contents. Cannot subvert the on-chain program's atomic
+    state transitions once a transaction is included in a finalised block.
+\end{description}
+
+\paragraph{Composability.} Privacy results in this section hold against the
+union $\Adv_{\mathsf{net}} \cup \Adv_{\mathsf{mint},t-1} \cup
+\Adv_{\mathsf{chain}}$ jointly; double-spend resistance holds additionally
+against $\Adv_{\mathsf{user}}$.
+
+\paragraph{What is \emph{not} modelled.} We exclude side-channel attacks on
+the user's wallet device (covered by wallet-level mitigations in
+\S6), targeted denial-of-service against individual mint
+operators (covered by the $t$-out-of-$n$ availability margin in
+\S8), and physical compromise of HSMs (covered by the
+mandatory FIPS 140-2 Level 3 deployment requirement in \S3.1).
+
+\subsection{Security Assumptions}
+\label{sec:security-assumptions}
+
+\paragraph{A1 (ECDLP on $\mathbb{G}$).}
+\label{assn:ecdlp}
+For the ed25519 prime-order subgroup $\mathbb{G}$ of order
+$\ell \approx 2^{252}$, given a uniformly random $X = x \cdot G$, no
+polynomial-time adversary recovers $x$ with non-negligible probability:
+\[
+  \Pr_{x \gets \mathbb{Z}_\ell}\bigl[\Adv(X) = x\bigr] \leq \negl(\lambda).
+\]
+
+\paragraph{A2 (Random-Oracle Model).}
+\label{assn:rom}
+We model SHA-512-reduced-mod-$\ell$ (used for Schnorr challenges,
+\S2.3) and SHA-256 (used for nullifiers,
+\S4.2) as random oracles in the security proofs of
+T1, T2, T4. The hash-to-scalar output bias is bounded by $2^{-260}$
+(\S2.3), which is sub-negligible for any
+$\poly(\lambda)$ adversary.
+
+\paragraph{A3 (Pedersen binding under DDH on $(G, H)$).}
+\label{assn:pedersen}
+For the joint commitment $C_{i,0} = s_i \cdot G + r_i \cdot H$
+(\S3.5) with independently sampled generator $H$
+(canonical hash-to-curve of the domain string \texttt{"TARDUS-vss-h-v1"}),
+no polynomial-time adversary opens $C$ to two distinct pairs
+$(s_i, r_i), (s_i', r_i')$ with $s_i \neq s_i'$.
+
+\paragraph{A4 (Hash collision resistance).}
+\label{assn:cr}
+SHA-256 and SHA-512 are collision-resistant against $\poly(\lambda)$
+adversaries with output-bit-length security.
+
+\paragraph{A5 (Honest threshold).}
+\label{assn:threshold}
+In any DKG, sign, or refresh ceremony, at least $t$ of the $n$ mint
+operators follow the protocol honestly. Corruption is static
+(decided before the ceremony begins); the proactive reshare protocol
+(\S3.7) re-randomises shares between epochs to mitigate
+slow-creep corruption.
+
+\paragraph{A6 (Solana consensus safety).}
+\label{assn:solana}
+Transactions included in a Solana block finalised at depth $\geq 32$ slots
+are durable; the on-chain program's atomic state transitions hold under
+this finality assumption.
+
+\subsection{Theorem T1 --- Coin Unforgeability}
+\label{sec:thm-unforgeability}
+
+\begin{theorem}[Coin Unforgeability]
+\label{thm:unforgeability}
+Under assumptions A1 (ECDLP), A2 (ROM), and A5 (honest threshold), the
+TARDUS threshold blind Schnorr signature (\S4) is
+existentially unforgeable under chosen-message attack
+($\mathsf{EUF\text{-}CMA}$) against any adversary $\Adv \in
+\Adv_{\mathsf{user}} \cup \Adv_{\mathsf{mint},t-1}$. Formally, for any
+$\poly(\lambda)$-time $\Adv$ making $q_s$ signing queries and $q_h$
+random-oracle queries,
+\[
+  \Pr\bigl[\AdvG{\mathsf{unforge}}^{\Adv}(\lambda) = 1\bigr] \leq
+  \frac{q_h \cdot \mathsf{Adv}^{\mathsf{ECDLP}}_{\mathbb{G}}(\lambda)}{1 - 1/\ell}
+  + \negl(\lambda).
+\]
+\end{theorem}
+
+\paragraph{Reduction sketch.} The proof composes two classical results:
+
+\begin{enumerate}[leftmargin=2em,itemsep=0pt]
+  \item \emph{Single-key Schnorr is EUF-CMA under ECDLP + ROM} by
+        Pointcheval-Stern (\cite{pointcheval-stern1996}) via the
+        forking-lemma rewinding argument.
+  \item \emph{Threshold lift preserves unforgeability} by Stinson-Strobl
+        (\cite{stinson-strobl2001}) when the underlying blind signature is
+        unforgeable and the threshold is at most $t-1$. The reduction
+        simulates the corrupted minority's view from the random
+        oracle programming, exactly as in single-key.
+\end{enumerate}
+
+The validator-side commitment phase
+(\S4.4) prevents the bias attack of
+\cite{nick-ruffing-seurin2020}: validators publish $R_i = k_i \cdot G$
+\emph{before} seeing the user's message, so the adversary cannot adaptively
+choose challenges to favour a target signature.
+
+\paragraph{Corruption boundary.} At exactly $t$ corruptions the adversary
+reconstructs the joint secret $x = \sum_{i \in S} \lambda_{S,i} \cdot s_i$
+via Lagrange interpolation (\S3.6) and forgery is trivial.
+The proactive reshare protocol (\S3.7) bounds the corruption
+window to one epoch.
+
+\subsection{Theorem T2 --- Issuance Blindness}
+\label{sec:thm-blindness}
+
+\begin{theorem}[Issuance Blindness]
+\label{thm:issuance-blindness}
+Under assumption A1 (ECDLP) and the Pointcheval-Stern blinding analysis
+(\cite{pointcheval-stern1996}), the user's view in a TARDUS issuance
+session is statistically independent of the resulting coin's pair
+$(Cp, \sigma)$. Formally, for any unbounded mint-side adversary
+$\Adv \in \Adv_{\mathsf{mint},t-1}$ and any two messages
+$Cp_0, Cp_1 \in \mathbb{G}$, the issuance transcripts produced by signing
+$Cp_0$ and $Cp_1$ are perfectly indistinguishable:
+\[
+  \mathsf{SD}\bigl(\mathsf{Trans}(Cp_0),\ \mathsf{Trans}(Cp_1)\bigr) = 0.
+\]
+\end{theorem}
+
+\paragraph{Reduction sketch.} The user samples uniformly random blinding
+factors $\alpha, \beta \gets \mathbb{Z}_\ell^\ast$ in Round 2 of the
+threshold blind sign (\S4.5). The blinded challenge
+$c' = c + \beta$ and blinded commitment $R' = R + \alpha \cdot G + \beta
+\cdot Cp$ are uniform over $\mathbb{Z}_\ell$ and $\mathbb{G}$
+respectively, independent of $Cp$. The mint sees only $(R', c', s')$
+where $s'$ is the response to $c'$; the unblinding step
+($s = s' - \alpha$, $c$ recovered) preserves uniformity. The
+information-theoretic argument gives statistical distance $0$, stronger
+than the computational indistinguishability typically achieved by
+zero-knowledge schemes.
+
+\paragraph{Note.} The blindness result is \emph{unconditional} (no
+computational assumption on the mint side), in contrast to T1 which
+reduces to ECDLP. This is a strength inherited from Chaum's 1982
+construction.
+
+\subsection{Theorem T3 --- Double-Spend Prevention}
+\label{sec:thm-double-spend}
+
+\begin{theorem}[Double-Spend Prevention]
+\label{thm:double-spend}
+Under assumptions A4 (SHA-256 collision resistance) and A6 (Solana
+finality), any attempt by $\Adv \in \Adv_{\mathsf{user}}$ to submit a
+spend for the same coin $(Cp, \sigma)$ twice is rejected with probability
+$1$ at the protocol level. Formally,
+\[
+  \Pr\bigl[\AdvG{\mathsf{double\text{-}spend}}^{\Adv}(\lambda) = 1\bigr] = 0
+\]
+after the first spend's transaction has finalised on chain.
+\end{theorem}
+
+\paragraph{Proof.} The nullifier
+$\mathsf{null}(Cp) = \mathsf{SHA\text{-}256}(\text{``TARDUS-nullifier-v1''} \,\|\, Cp)$
+is deterministic in $Cp$ (\S4.2). The on-chain
+\texttt{Refresh} and \texttt{Withdraw} handlers (\S5.3.3)
+perform $\mathsf{NullifierSet.insert}(\mathsf{null}(Cp))$, which returns
+\texttt{false} if the entry is already present and aborts the
+transaction with \texttt{ERR\_DOUBLE\_SPEND}. This insertion is wrapped
+inside the atomic boundary of a single Solana transaction; under A6 the
+state mutation is durable upon finalisation. Hash collisions are excluded
+by A4. \qed
+
+\paragraph{Empirical anchor.} The on-chain program v1.4.10 deployed at
+\texttt{AmY1ysgQyCC6CmorXkrNkogBSHmomy4kbsPziAYUx47u} on Solana devnet
+implements this exact check; the CLI's client-side preflight
+(the CLI \texttt{tardus devnet refresh}) rejects double-spend attempts before paying
+transaction fees, providing defence in depth.
+
+\subsection{Theorem T4 --- Cut-and-Choose Soundness}
+\label{sec:thm-cut-and-choose}
+
+\begin{theorem}[Cut-and-Choose Soundness for Refresh]
+\label{thm:cut-and-choose}
+Under assumptions A1 (ECDLP) and A2 (ROM), the $\kappa$-fold
+cut-and-choose refresh protocol (\S4) binds a malicious
+user to producing a denomination-preserving and unlinkable replacement coin
+with cheating probability at most
+\[
+  \Pr[\mathsf{cheat}] \leq \frac{1}{\kappa + 1}.
+\]
+For the default $\kappa = 32$ (\S4.5), this is
+$\approx 3.0\%$ per session; a malicious user wishing to extract
+$\Delta$-fold value must succeed $\Delta$ times, with probability
+$1 / 33^\Delta$.
+\end{theorem}
+
+\paragraph{Proof sketch.} The user commits in Round 2 to $\kappa + 1$
+candidate trapdoors $(c_1, \ldots, c_{\kappa+1})$, each encoding a
+candidate replacement coin. The mint's Round 3 random challenge selects a
+subset $S \subset [\kappa+1]$ of size $\kappa$ to reveal. The remaining
+candidate $j = [\kappa+1] \setminus S$ is unblinded and signed; the user
+recovers a single fresh coin. For the user to cheat (e.g.\ extract more
+denominations than they surrendered), all $\kappa$ revealed candidates
+must be consistent with the protocol \emph{and} the one unrevealed
+candidate must encode the cheat: probability $1/(\kappa+1)$ assuming the
+mint's challenge is uniform. The Round 4 reveal-and-verify step
+(\S4.5) checks consistency cryptographically; the
+Pedersen binding under A3 prevents equivocation between commit and reveal.
+
+\paragraph{Anonymity preservation.} The unrevealed candidate $j$ is
+information-theoretically independent of the user's identity (it is a
+freshly sampled scalar). The mint sees only the revealed $\kappa$
+candidates, which the user has bound by commitment, plus the blinded
+issuance transcript of $j$ which by T2 is independent of the underlying
+$(Cp_{\mathsf{new}}, \sigma_{\mathsf{new}})$. Hence the new coin is
+unlinkable to the old coin in the union of $\Adv_{\mathsf{net}}$ and
+$\Adv_{\mathsf{mint},t-1}$.
+
+\subsection{Theorem T5 --- Reshare Correctness}
+\label{sec:thm-reshare}
+
+\begin{theorem}[Proactive Reshare Joint-Key Invariance]
+\label{thm:reshare}
+Under assumptions A1 (ECDLP), A3 (Pedersen binding), and A5 (honest
+threshold), the proactive reshare protocol (\S3.7) transforms
+the shares $(s_1, \ldots, s_n)$ into fresh shares $(s_1', \ldots, s_n')$
+such that:
+\begin{enumerate}[leftmargin=2em,itemsep=0pt]
+  \item the joint public key $X = x \cdot G$ is preserved (where
+        $x = \sum_{i} \lambda_i s_i = \sum_{i} \lambda_i s_i'$);
+  \item the new shares are uniformly distributed conditional on $X$;
+  \item old shares from epoch $e$ are useless for any operation in epoch
+        $e + 1$ or later.
+\end{enumerate}
+\end{theorem}
+
+\paragraph{Proof sketch.} The reshare uses a zero-polynomial Pedersen-VSS:
+each operator distributes shares of $0$ via a fresh degree-$(t-1)$
+polynomial $\tilde{f}_i$ with $\tilde{f}_i(0) = 0$. New shares are
+$s_j' = s_j + \sum_i \tilde{f}_i(j)$. The dual-commitment broadcast
+(\S3.5) lets honest operators detect a cheating
+dealer who chose $\tilde{f}_i(0) \neq 0$; the additional check
+$\tilde{A}_{i,0} = \mathcal{O}$ (the identity element)
+catches this case explicitly (\S3.7). The
+joint-key invariance is algebraic: $\sum_j \lambda_j s_j' =
+\sum_j \lambda_j s_j + \sum_i \tilde{f}_i(0) = x + 0 = x$. The
+uniformity follows from the freshness of $\tilde{f}_i$. The
+\emph{usefulness} of old shares for epoch $e+1$ requires solving
+$s_j' = s_j + \delta_j$ for $\delta_j$ given only $X$; this is equivalent
+to ECDLP. \qed
+
+\paragraph{Empirical anchor.} The crown-jewel
+\texttt{sign\_after\_reshare} test in the \texttt{tardus-mint} crate
+(test suite) demonstrates that a signature produced by a
+$t$-subset of the new shares verifies under the original $X$, while a
+signature attempted with one new and one old share fails.
+
+\subsection{Theorem T6 --- Vault Collateral Invariant}
+\label{sec:thm-collateral}
+
+\begin{theorem}[Vault Collateral Invariant]
+\label{thm:collateral}
+Under assumption A6 (Solana finality) and the on-chain handlers'
+canonical-PDA validation (\S5.4), at every
+finalised state $\sigma$ of the program the vault's lamport balance
+satisfies the bookkeeping invariant
+\[
+  \mathsf{Vault}[\Denom].\mathsf{lamports} \;\geq\;
+  \Denom \cdot \bigl(\,
+    \#\mathsf{IssuedCoins}[\Denom] - \#\mathsf{NullifierSet} \cap
+        \mathsf{NullifiersOf}[\Denom]
+  \,\bigr).
+\]
+\end{theorem}
+
+\paragraph{Proof.} The handler-by-handler accounting is mechanical:
+\texttt{Deposit} requires a preceding system\_program::transfer of at least
+$\Denom$ lamports to the vault PDA, observed via
+\texttt{vault\_account.lamports()} (\S5.3.2);
+\texttt{Withdraw} removes exactly $\Denom$ lamports via
+\texttt{invoke\_signed} after a successful nullifier insertion
+(\S5.3.4); \texttt{Refresh} does not touch the vault
+(\S5.3.3, anonymity preservation). The on-chain code
+explicitly checks
+\texttt{vault\_account.lamports() < denom} and returns
+\texttt{ERR\_VAULT\_INSUFFICIENT} if violated. Hence the invariant is
+restored after every successful transaction; A6 ensures durability. \qed
+
+\paragraph{Operational implication.} A user can perform a
+\emph{collateral audit} at any time by reading the vault account's
+lamport balance and the on-chain nullifier set, then comparing against
+the off-chain issued-coin database (publicly aggregated by the mint
+committee as part of the transparency log). Any deviation is publicly
+observable.
+
+\subsection{Theorem T7 --- Sealed-Box Payload Confidentiality}
+\label{sec:theorem-T7}
+
+\begin{theorem}[Sealed-Box IND-CCA, v1.7]
+\label{thm:T7}
+Let $\mathsf{SB}$ be the TARDUS sealed-box AEAD construction of
+\Cref{sec:relay-payload}: $\mathsf{Seal}(m, pk_R) = epk \,\|\,
+\mathsf{ChaCha20\text{-}Poly1305}_{K,N}(m)$ where
+$(K,N) = \mathsf{HKDF\text{-}SHA\text{-}256}(\mathsf{ECDH}(esk, pk_R^{(\mathrm{X25519})}))$.
+For any PPT adversary $\mathcal{A}$ playing the IND-CCA game and
+controlling the relay operator (i.e. observing all sealed-box wire
+bytes and adaptively requesting decryptions of any non-challenge
+ciphertext under the recipient's secret key), there exist PPT
+adversaries $\mathcal{B}_1, \mathcal{B}_2$ such that
+\[
+  \mathsf{Adv}^{\mathrm{IND\text{-}CCA}}_{\mathsf{SB}}(\mathcal{A}) \;\leq\;
+  \mathsf{Adv}^{\mathrm{IND\text{-}CCA}}_{\mathsf{ChaCha20\text{-}Poly1305}}(\mathcal{B}_1) \;+\;
+  \mathsf{Adv}^{\mathrm{ECDLP}}_{X25519}(\mathcal{B}_2) \;+\;
+  \frac{q_H}{2^{256}} \;+\; \mathsf{negl}(\lambda),
+\]
+where $q_H$ is the number of HKDF (i.e.\ SHA-256-based PRF)
+queries.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+The reduction composes three layers, each modular against the
+others:
+
+\begin{enumerate}[leftmargin=2em,itemsep=0pt]
+  \item \textbf{ECDH key indistinguishability.}
+    Replace the genuine shared secret
+    $s = \mathsf{ECDH}(esk, pk_R^{(\mathrm{X25519})}) = esk \cdot pk_R^{(\mathrm{X25519})}$
+    with a uniformly random
+    $s' \xleftarrow{\$} \{0,1\}^{256}$ (the ECDLP / DDH game on
+    Curve25519). An adversary distinguishing genuine from random
+    $s$ in the sealed-box context wins the DDH game for X25519;
+    the loss is $\mathsf{Adv}^{\mathrm{ECDLP}}_{X25519}(\mathcal{B}_2)$.
+  \item \textbf{HKDF PRF.}
+    With $s'$ uniform, the HKDF-derived $(K, N)$ pair is
+    statistically indistinguishable from uniform up to a
+    $q_H / 2^{256}$ collision probability across the
+    $\mathcal{A}$'s HKDF queries.
+  \item \textbf{ChaCha20-Poly1305 IND-CCA.}
+    The challenge ciphertext is then a fresh ChaCha20-Poly1305
+    encryption under uniformly random $(K, N)$. Any IND-CCA
+    distinguisher on the sealed-box reduces directly to an IND-CCA
+    distinguisher on the underlying AEAD; the loss is
+    $\mathsf{Adv}^{\mathrm{IND\text{-}CCA}}_{\mathsf{ChaCha20\text{-}Poly1305}}(\mathcal{B}_1)$.
+\end{enumerate}
+
+The compromised-relay adversary model is captured by giving
+$\mathcal{A}$ the oracle that returns sealed-box wire bytes for
+arbitrary plaintexts (chosen-plaintext oracle) plus the
+decryption oracle for any non-challenge ciphertext (chosen-
+ciphertext oracle). Both are simulated against the underlying
+ChaCha20-Poly1305 oracle in step 3 after the ECDH-to-random hop.
+
+The full mechanisation is in
+\texttt{spec/easycrypt/sealed\_box.ec} (Phase 4 audit firm
+hand-off).
+\end{proof}
+
+\subsection{Theorem T8 --- Confidential Vault Indistinguishability (v1.7 placeholder)}
+\label{sec:theorem-T8}
+
+\begin{theorem}[Vault Balance Indistinguishability, v1.5+ target]
+\label{thm:T8}
+Let $\mathsf{Vault}^{\mathrm{conf}}$ be the v1.5+
+Token-2022 ConfidentialMint vault construction (deferred; design
+doc at \texttt{deploy/runbooks/token-2022-confidential-mint-design.md}).
+For any PPT adversary $\mathcal{A}$ observing the on-chain
+encrypted balance commitments + auditor public key + all public
+TARDUS metadata, the probability $\mathcal{A}$ distinguishes the
+real vault SOL balance $a_0$ from any
+$a_1 \in [0, 2^{64})$ is bounded by:
+\[
+  \mathsf{Adv}^{\mathrm{IND}}_{\mathsf{Vault}^{\mathrm{conf}}}(\mathcal{A}) \;\leq\;
+  \mathsf{Adv}^{\mathrm{IND\text{-}CPA}}_{\mathsf{ElGamal}_{\mathrm{Edwards}}}(\mathcal{B}_3) \;+\;
+  \mathsf{Adv}^{\mathrm{Soundness}}_{\mathsf{RangeProof}}(\mathcal{B}_4) \;+\;
+  \mathsf{negl}(\lambda).
+\]
+\end{theorem}
+
+\paragraph{Status.} \textbf{Placeholder; not provable on v1
+plain-SOL vault.} v1 ships with publicly visible vault SOL
+balances (the deposit and withdraw amounts are observable on
+the Solana chain). T8 becomes provable once Faz E full ships
+(estimated v1.5+, $\approx 19$ engineering weeks; see
+architecture decision record in
+\texttt{token-2022-confidential-mint-design.md}). The placeholder
+is included here to lock the audit firm's expected formal-
+verification surface area pre-engagement, so the Phase 4 audit
+contract can reference T8 by name.
+
+\paragraph{Reduction sketch (for v1.5+).}
+The reduction composes Token-2022's
+ElGamal-encrypted-balance ciphertext (the $\mathcal{B}_3$ hop)
+with the deposit / withdraw range-proof soundness
+($\mathcal{B}_4$ hop). Concretely: the auditor's view sees
+$\mathsf{Enc}_{\mathrm{auditor}}(a)$; an IND-CPA distinguisher on
+ElGamal under the Edwards subgroup recovers $a$ vs $a'$ with the
+$\mathcal{B}_3$ advantage. The range proof's soundness ensures
+the amount is in the declared range $[0, 2^{64})$; without
+soundness, an adversary could mint negative amounts and break
+T6 simultaneously.
+
+\subsection{Theorem T9 --- Fee-Payer Unlinkability (v1.8)}
+\label{sec:theorem-T9}
+
+\begin{theorem}[Fee-Payer Unlinkability, Layer 1--4 composed]
+\label{thm:T9}
+Let $\mathcal{P} = \{P_1, \ldots, P_n\}$ be the set of TARDUS
+spend-class transactions (Refresh or Withdraw) submitted to
+Solana within an observation window $W$, each accompanied by a
+funding chain through the on-chain $\mathsf{SponsorPool}$ PDA per
+\Cref{sec:mint-fee-payer-privacy} (Layer 3+4). Let
+$\mathcal{F} = \{F_1, \ldots, F_m\}$ be the set of distinct
+deposit-class transactions to the $\mathsf{SponsorPool}$ inside
+the same window $W$, originating from independent funding
+wallets.
+
+For any PPT chain-graph adversary $\mathcal{A}$ with read access
+to the entire Solana ledger state inside $W$ — including every
+TX hash, every account balance trajectory, every instruction
+log, and the public IP source of each TX submission — the
+advantage of $\mathcal{A}$ in correctly mapping any specific
+spend-class TX $P_i$ to the funding wallet whose deposit
+ultimately funded its fee payment is bounded by:
+\[
+  \mathsf{Adv}^{\mathrm{link}}_{\mathsf{Layer1{+}4}}(\mathcal{A}) \;\leq\;
+  \frac{1}{|\mathcal{F}|} \;+\;
+  \mathsf{Adv}^{\mathrm{IP\text{-}deanon}}_{\mathrm{network}}(\mathcal{B}_5) \;+\;
+  \mathsf{Adv}^{\mathrm{timing}}_{\mathrm{slot}}(\mathcal{B}_6) \;+\;
+  \mathsf{negl}(\lambda),
+\]
+where $\mathcal{B}_5$ wins an IP-deanonymisation game (e.g.\
+linking submitter IPs across the Solana RPC layer) and
+$\mathcal{B}_6$ exploits per-slot timing fingerprints across the
+deposit and payout TXs.
+\end{theorem}
+
+\begin{proof}[Proof sketch]
+The reduction has three layers:
+
+\begin{enumerate}[leftmargin=2em,itemsep=0pt]
+  \item \textbf{Pool indistinguishability ($1/|\mathcal{F}|$ term).}
+    The $\mathsf{SponsorPool}$ PDA is a single program-owned account
+    whose balance trajectory aggregates all deposits and all
+    payouts. From the chain observer's view, every deposit
+    $F_j$ contributes its lamports indistinguishably to the
+    pool's running balance; every payout $\mathsf{SponsorPayout}$
+    instruction (\Cref{sec:onchain-instr-sponsor}) drains a
+    fixed amount $\Lambda$ to an ephemeral keypair $E_k$. Inside
+    the on-chain log, $E_k$ has no traceable predecessor beyond
+    "drawn from the pool"; the funding wallet $F_j$ that
+    notionally "covered" the payout is statistically uniform
+    over $\mathcal{F}$ as long as deposits arrive faster than
+    payouts (a steady-state liquidity assumption).
+
+  \item \textbf{Ephemeral signer + pool caller rotation (Layers 1, 2, 4).}
+    Each spend-class TX $P_i$ is signed by a fresh ephemeral
+    keypair $E_i$ (Faz 9.1) funded by the pool payout. Each
+    pool payout itself is invoked by a caller keypair drawn at
+    random from the sponsor pool (Faz 9.5). The on-chain
+    signing-chain graph
+    $E_i \leftarrow \mathsf{Payout}_{C_j} \leftarrow F_k$
+    has fan-in $|\mathcal{F}|$ from every spend's perspective,
+    so the joint posterior $\Pr[E_i \text{ funded by } F_k \mid
+    \text{public chain state}]$ is $\approx 1/|\mathcal{F}|$.
+
+  \item \textbf{Side channels ($\mathcal{B}_5$, $\mathcal{B}_6$).}
+    The reduction does not close (i) network-layer
+    deanonymisation (the submitter's IP visible to the Solana
+    RPC endpoint and any intermediate router), nor (ii) per-slot
+    timing fingerprints (a deposit at slot $S$ and a payout at
+    slot $S+\Delta$ for small $\Delta$ creates a correlation
+    even if no direct funding link is on-chain). These are
+    explicitly enumerated in
+    \Cref{sec:mint-fee-payer-privacy} ("Residual leaks not
+    addressed by Layers 1--4") and require independent
+    countermeasures (Tor / I2P for $\mathcal{B}_5$; random
+    submission delays + Jito bundle ordering of
+    \Cref{sec:mint-batch} for $\mathcal{B}_6$).
+\end{enumerate}
+
+The deposit-rate-exceeds-payout-rate assumption is operationally
+necessary: if the pool drains faster than it refills, the
+adversary can pinpoint the specific deposit that "must have"
+funded a specific payout by lamport-balance accounting. The
+spec's drain-rate ceiling
+($\approx 14\,\mathrm{SOL/hour}$ at default parameters; see
+\Cref{sec:onchain-instr-sponsor}) is calibrated so this
+condition is satisfied under typical mainnet deposit cadence.
+\end{proof}
+
+\paragraph{Status.} v1.8 spec — theorem statement and informal
+reduction shipped. Full mechanisation in EasyCrypt is a Phase 4
+audit firm task (the $1/|\mathcal{F}|$ uniform-posterior bound
+is straightforward but the steady-state liquidity assumption
+requires a real-world model that the audit firm scopes).
+
+\paragraph{Concrete empirical bound (devnet).} The devnet
+$\mathsf{SponsorPool}$ PDA holds $\approx 49\,000\,000$ lamports
+across $\approx 5$ historical deposits, with payouts of
+$10^6$ lamports each. With $|\mathcal{F}| = 5$, an adversary's
+direct link probability is $\approx 20\%$ — improving to $< 1\%$
+once $|\mathcal{F}| \geq 100$ on mainnet under healthy deposit
+cadence. The live demo of 2026-05-22 (TX
+\texttt{3UVkfK5tt671FDJ\ldots}) exhibits this property
+end-to-end: the spend-class Withdraw signer
+\texttt{B3mFCD2qdedYd2nYuTcwZFZS1ghCs7DwKQRtgrvhWszq} is
+demonstrably an ephemeral keypair distinct from the deployer
+wallet, funded via an on-chain $\mathsf{SponsorPayout}$.
+
+\subsection{Composition: TARDUS-Level Security}
+\label{sec:composition}
+
+\begin{corollary}[End-to-End Security]
+\label{cor:end-to-end}
+The TARDUS protocol satisfies the following composite guarantees:
+\begin{enumerate}[leftmargin=2em,itemsep=0pt]
+  \item \textbf{Coin authenticity} (T1 + T5): no party can produce a valid
+        $(Cp, \sigma)$ without participating in a legitimate issuance or
+        refresh session, even across reshare epochs;
+  \item \textbf{Sender/receiver/amount privacy} (T2 + T4): on-chain
+        observers cannot link a refreshed coin to its predecessor, the
+        mint cannot link an issued coin to a refreshed predecessor, and
+        the per-coin denomination is the only amount-related leak;
+  \item \textbf{Atomic ledger integrity} (T3 + T6): the on-chain vault
+        balance and nullifier set are consistent at every finalised
+        slot, and double-spends are deterministically rejected.
+\end{enumerate}
+\end{corollary}
+
+\paragraph{Remaining gaps.} The denomination is leaked at deposit and
+withdraw time (the user surrenders exactly $\Denom$ lamports to the vault
+PDA, observable on-chain). Phase 1.4.11 will replace the SOL vault with
+a Solana Token-2022 Confidential Mint vault, which encrypts the deposit
+and withdraw amounts; the per-coin denomination then becomes a private
+field of the mint's bookkeeping, not visible on the chain. Phase 1.4.12
+will migrate the Borsh-encoded nullifier set
+(\S5.3.3) to a Light Protocol compressed Merkle
+tree, raising the per-vault capacity from $\approx 250$ to $2^{32}$
+nullifiers.
+
+\subsection{Mechanisation Roadmap}
+\label{sec:mech-roadmap}
+
+Phase 4 of the project will mechanise theorems T1, T2, and T4 in
+EasyCrypt (\cite{easycrypt2013}). Tactical sketch:
+
+\begin{description}[leftmargin=2em,style=nextline]
+  \item[\texttt{schnorr.ec}]
+    Encodes the single-key Schnorr signature, the
+    Pointcheval-Stern forking argument, and the ROM tape. Discharges T1
+    in the single-key case.
+  \item[\texttt{threshold\_lift.ec}]
+    Encodes the simulator for the corrupted minority's view (per
+    \cite{stinson-strobl2001}) and reduces threshold T1 to single-key T1.
+  \item[\texttt{blind.ec}]
+    Encodes the blinding-factor algebra of T2 and proves perfect
+    indistinguishability (zero statistical distance) of the issuance
+    transcripts.
+  \item[\texttt{cut\_choose.ec}]
+    Encodes the $\kappa$-fold cut-and-choose game and proves the
+    $1/(\kappa+1)$ cheating bound of T4.
+\end{description}
+
+T3, T5, and T6 are operational invariants whose mechanisation reduces to
+runtime checks already present in the reference implementation; they
+require no separate proof effort beyond the test suite of
+test suite.

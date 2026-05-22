@@ -1,0 +1,28 @@
+[package]
+name              = "tardus-refresh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license-file.workspace = true
+publish.workspace = true
+description       = "TARDUS refresh protocol: coin model, HKDF-based secret derivation, κ-fold cut-and-choose."
+
+[dependencies]
+tardus-core      = { path = "../tardus-core" }
+tardus-mint      = { path = "../tardus-mint" }
+curve25519-dalek = { version = "4", default-features = false, features = ["alloc", "zeroize", "rand_core", "precomputed-tables"] }
+sha2             = { version = "0.10", default-features = false }
+hkdf             = { version = "0.12", default-features = false }
+rand_core        = { version = "0.6", default-features = false }
+zeroize          = { version = "1", default-features = false, features = ["derive"] }
+subtle           = { version = "2", default-features = false }
+borsh            = { version = "1", default-features = false, features = ["derive"] }
+
+[dev-dependencies]
+rand        = "0.8"
+rand_chacha = "0.3"
+hex         = "0.4"
+
+[lints]
+workspace = true

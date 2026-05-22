@@ -1,0 +1,68 @@
+\section{Protocol}
+\label{sec:protocol}
+
+This section walks through TARDUS at the protocol level. The order matches the lifecycle of a coin: setup, deposit, issuance, refresh, withdraw. The fee-payer privacy stack is broken out at the end because it cuts across all spend-class operations.
+
+\subsection{Setup}
+\label{sec:proto-setup}
+
+The committee runs a Komlo--Goldberg DKG and ends up holding shares of a joint mint key. The joint public key $pk_{\mathrm{joint}}$, together with the denomination $D$ that it signs and an epoch counter $\mathit{epoch}$, forms a keyset record. The user calls \texttt{RegisterKeyset} on the on-chain program to record this record in the on-chain keyset registry; the call requires at least $t$ committee transcript signatures to be considered valid. The reference implementation supports many keysets per program instance, one per denomination. Common denominations in our devnet deployment are 0.001, 0.005, and 0.01\,SOL.
+
+\subsection{Deposit}
+\label{sec:proto-deposit}
+
+A user who wants $D$ lamports' worth of bearer-coin liquidity transfers exactly $D$ lamports to the per-denomination vault PDA (seeds \texttt{["tardus", "vault", D.to\_le\_bytes()]}). The transfer is a vanilla System program transaction; the on-chain TARDUS program is not invoked. This is the only point in the protocol where the user's funding wallet is publicly linked to a TARDUS deposit. After this step, the user has no on-chain link to any coin they subsequently mint.
+
+\subsection{Issuance}
+\label{sec:proto-issue}
+
+Issuance is the threshold blind Schnorr ceremony. The user picks a fresh coin secret $x \xleftarrow{\$} \mathbb{Z}_\ell$, derives the candidate public commitment $C_p = x \cdot G$, and blinds it according to the Pointcheval--Stern protocol. Each validator returns a partial blind signature; the user unblinds them, aggregates to a single signature $\sigma$ under $pk_{\mathrm{joint}}$, and verifies that $(C_p, \sigma)$ is valid. The pair $(x, C_p, \sigma, D)$ is the coin. The user stores it locally in an encrypted wallet database.
+
+Issuance happens entirely off-chain. The on-chain surface sees nothing.
+
+\subsection{Refresh}
+\label{sec:proto-refresh}
+
+To spend partial value or simply refresh a coin to break linkability, the user runs the cut-and-choose protocol of~\cite{dold2019}. They commit to $\kappa + 1$ candidate coin pairs, each summing to the input coin's denomination. Validators jointly sample a challenge index $r \in [0, \kappa]$, the user opens every pair except the $r$-th, validators verify the opened pairs sum correctly, and only the $r$-th pair is then blind-signed by the committee. The user submits a single on-chain \texttt{Refresh} transaction containing:
+
+\begin{itemize}[leftmargin=2em,itemsep=2pt]
+  \item an ed25519 precompile instruction verifying $\sigma$ on the surrendered coin's $C_p$ against the keyset's $pk_{\mathrm{joint}}$;
+  \item a \texttt{Refresh} instruction that reads the registry PDA, computes $\mathit{nullifier} = \operatorname{SHA-256}(\mathtt{"TARDUS-nullifier-v1"} \,\|\, C_p)$, inserts it into the on-chain nullifier set, and returns success.
+\end{itemize}
+
+The new coins are bearer instruments held off-chain. The on-chain effect of a Refresh is exactly one nullifier insertion. Observers see neither the new coins nor any link to the surrendered one.
+
+\subsection{Withdraw}
+\label{sec:proto-withdraw}
+
+A Withdraw transaction looks like a Refresh but moves real SOL out of the vault. The user supplies a coin $(C_p, \sigma, D)$ and a recipient pubkey. The program verifies the signature via the same ed25519 precompile, computes the nullifier, checks it is not already in the set, inserts it, and uses \texttt{invoke\_signed} to transfer $D$ lamports from the vault PDA to the recipient. The recipient pubkey is pinned in the instruction data, so the transaction signer cannot redirect funds en route.
+
+We use Withdraw to close the economic loop on devnet: a fresh recipient wallet receives native SOL through a TARDUS coin that was minted via the off-chain blind-sign ceremony, delivered via a sealed-box payload through our relay, and surrendered on chain to release the vault funds. The fee payer of the Withdraw need not be the recipient, and (per the fee-payer privacy stack below) typically is not.
+
+\subsection{Sealed-box delivery}
+\label{sec:proto-sealedbox}
+
+To hand a coin from Alice to Bob without the on-chain surface seeing the hand-off, we use a small relay daemon that stores opaque ciphertexts keyed by recipient pubkey. Alice computes a sealed-box AEAD ciphertext for Bob's receiving pubkey and POSTs it to the relay; Bob polls for messages addressed to his pubkey, fetches the ciphertext, and decrypts.
+
+The construction mirrors NaCl's \texttt{crypto\_box\_seal}~\cite{nacl} but ends with an Ed25519 receiving pubkey rather than a native X25519 one. The wire format is:
+\[
+  \mathit{wire} = \underbrace{epk^{(M)}}_{\text{32 bytes}} \,\|\, \underbrace{\operatorname{ChaCha20Poly1305}_{K, N}(\mathit{plaintext})}_{\text{$|m| + 16$ bytes}},
+\]
+where $(K, N) = \operatorname{HKDF\text{-}SHA\text{-}256}(\mathit{salt} = \mathtt{"TARDUS-sealed-box-v1"}, \mathit{ikm} = esk \cdot pk_R^{(M)}, \mathit{info} = epk^{(M)} \,\|\, pk_R^{(M)})$ and the ephemeral keypair $(esk, epk^{(M)})$ is freshly sampled by the sender.
+
+The receiver, holding the Ed25519 secret scalar $sk$, recovers the same shared secret by computing $sk \cdot epk^{(M)}$ on the Montgomery curve. Notice this requires the scalar multiplication to be unclamped: the BIP-39-derived $sk$ is a canonical Ed25519 scalar modulo $\ell$, not an X25519-clamped value per RFC 7748. The distinction matters for any implementation, because most off-the-shelf X25519 libraries clamp by default and will not produce a shared secret that decrypts a TARDUS sealed-box. We state this explicitly in the specification appendix so independent implementations do not rediscover the constraint by failing round-trips.
+
+\subsection{Fee-payer privacy stack}
+\label{sec:proto-feepayer}
+
+Solana's base layer reveals every transaction's \texttt{fee\_payer} pubkey. If the user always pays their own fees, a graph crawler can correlate every spend they ever make. The fee-payer stack neutralises this in four composable layers.
+
+\textbf{Layer 1 --- ephemeral payer.} For each spend-class transaction, the client generates a fresh ed25519 keypair, transfers a small amount of SOL into it from a sponsor wallet (default $10^{-3}$\,SOL), and uses the ephemeral as the transaction's \texttt{fee\_payer}. The ephemeral never signs anything else and is dropped after the transaction. Each TARDUS spend then has a previously-unseen signer.
+
+\textbf{Layer 2 --- multi-sponsor rotation.} The single sponsor of Layer 1 is replaced by a small set of sponsor keypairs, picked at random per ephemeral. This breaks the "all ephemerals funded from the same wallet" residual link, at the cost of operating multiple sponsor wallets.
+
+\textbf{Layer 3 --- on-chain sponsor pool.} A program-owned PDA accepts deposits from anyone and pays out fixed amounts (default $10^{-3}$\,SOL) to fresh ephemeral keypairs. The pool commingles all deposits, so the on-chain link from an ephemeral payer back to "the wallet that funded my fees" runs through the pool's aggregated balance rather than through a direct transfer. The pool is rate-limited at one payout per five Solana slots ($\approx 2.5$\,s) to bound drain attacks at roughly 14\,SOL per hour under default parameters.
+
+\textbf{Layer 4 --- pool caller rotation.} The wallet that submits the \texttt{SponsorPayout} transaction is itself drawn at random from the sponsor pool, closing the "the deployer always calls payout" residual leak.
+
+The composed stack is the subject of Theorem T9 (\Cref{thm:T9}). On devnet we have $|\mathcal{F}| = 5$ sponsor wallets and the direct-link probability sits at roughly $20\%$; on mainnet, with $|\mathcal{F}| \geq 100$ under healthy deposit cadence, the bound drops below $1\%$.

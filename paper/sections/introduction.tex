@@ -1,0 +1,29 @@
+\section{Introduction}
+\label{sec:intro}
+
+Solana's privacy story today has two real options. The first is Token-2022's Confidential Transfer extension, which encrypts amounts under ElGamal but leaves sender, receiver, and the entire transaction graph in plain view. The second is to stack a SNARK system on top of the chain, in the style of Light Protocol's Groth16 path or the Aztec-style rollup ports; that buys full hiding at the cost of a per-circuit trusted setup, a 900\,000+ compute-unit budget per spend, and composability that is famously difficult to reason about.
+
+This paper takes a third road. We revive David Chaum's 1982 blind-signature bearer cash~\cite{chaum1982}, which predates and sidesteps both ZK rollups and confidential token machinery, and we wire it into a Solana-native harness. The construction is not new in any one of its layers --- Pointcheval--Stern proved blind Schnorr unforgeability in 1996~\cite{pointchevalstern1996}, Stinson--Strobl gave the threshold blind variant in 2001~\cite{stinsonstrobl2001}, Camenisch--Hohenberger--Lysyanskaya compact e-cash in 2005~\cite{chl2005}, and Dold's GNU Taler thesis in 2019~\cite{dold2019} settled the cut-and-choose refresh idea that makes denominations practical. What is, we believe, new is the way these layers compose to fit a public-blockchain setting that the original Chaum line never had to address: a public on-chain nullifier set, an open fee market, and an explicit account-graph adversary.
+
+\subsection{Contributions}
+
+\begin{itemize}[leftmargin=2em,itemsep=2pt]
+  \item A bearer-coin on-chain model in which the nullifier is computed from the coin's public commitment rather than its secret scalar. The detail looks small but it is what allows the on-chain program to reject double-spends inside Solana's 4\,KB SBF stack budget without dragging a full elliptic-curve library along (\Cref{sec:proto-refresh}).
+  \item A four-layer fee-payer privacy stack that decouples the spend-class transaction signer from any specific funding source. Layer 1 introduces a fresh ephemeral keypair per spend; Layer 2 rotates the sponsor across a small set; Layer 3 routes funding through an on-chain commingled pool; Layer 4 rotates the pool caller itself. We state the resulting linkability bound formally (\Cref{thm:T9}) and validate it empirically on devnet.
+  \item A sealed-box AEAD payload format on the off-chain delivery layer. The construction mirrors NaCl's \texttt{crypto\_box\_seal} but binds to Ed25519 receiving pubkeys via the RFC 7748 birational map, so the same key material that signs can also receive. We prove IND-CCA security in the random-oracle model via a three-layer reduction (\Cref{thm:T7}).
+  \item A complete protocol specification with nine security theorems (T1--T9), proof sketches for the seven that admit them, and a deferred placeholder T8 that pins the formal-verification surface area for the Token-2022 ConfidentialMint migration. EasyCrypt skeletons exist for T1, T2, T4, and T7.
+\end{itemize}
+
+\subsection{What this paper is not}
+
+We do not claim full amount privacy on the on-chain surface. The per-coin denomination is leaked at deposit and withdraw time. Token-2022's ConfidentialMint extension would close that gap; we describe the integration as future work (\Cref{sec:related-conf-mint}). Until it ships, anonymity sets remain per-denomination.
+
+We do not claim our security analysis is mechanised end-to-end. EasyCrypt skeletons exist for the foundational theorems; full mechanisation is a task for an external audit firm.
+
+We do not claim the construction is more efficient than ZK-based alternatives in every metric. It is dramatically cheaper in on-chain compute, but it shifts cost off-chain: each spend involves a $\kappa$-fold cut-and-choose with $\kappa = 32$ on default, which means thirty-two round-trips against the validator set. On commodity hardware that completes in under a second; on a high-latency link, the user-perceived cost is larger than a single-circuit ZK proof.
+
+This paper is also not an implementation report. We describe the protocol at the level of cryptographic primitives, on-chain instruction semantics, and security theorems. A reference implementation exists and has been exercised on Solana devnet for the measurements in \Cref{sec:evaluation}, but its internals are out of scope.
+
+\subsection{Structure}
+
+\Cref{sec:prelim} fixes notation and recalls the cryptographic primitives we lean on. \Cref{sec:protocol} describes the protocol from end to end. \Cref{sec:security} states the nine security theorems and sketches the proofs. \Cref{sec:evaluation} reports compute-unit measurements and the empirical fee-payer privacy demonstration. \Cref{sec:related-work} positions TARDUS against Cashu, Taler, Light Protocol, and Token-2022 Confidential Transfer. \Cref{sec:conclusion} closes with the path to a peer-reviewed mainnet ship.

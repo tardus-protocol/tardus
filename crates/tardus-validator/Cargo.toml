@@ -1,0 +1,53 @@
+[package]
+name              = "tardus-validator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license-file.workspace = true
+publish.workspace = true
+description       = "TARDUS validator daemon: holds an HSM-mediated mint share, coordinates DKG / sign / refresh ceremonies, and serves the user-facing HTTP API."
+
+[[bin]]
+name = "tardus-validator"
+path = "src/main.rs"
+
+[dependencies]
+tardus-core       = { path = "../tardus-core" }
+tardus-mint       = { path = "../tardus-mint" }
+tardus-refresh    = { path = "../tardus-refresh" }
+axum              = "0.7"
+axum-server       = { version = "0.7", features = ["tls-rustls"] }
+rustls            = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+rustls-pemfile    = "2"
+rustls-pki-types  = "1"
+webpki-roots      = "0.26"
+tokio             = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "fs", "io-util"] }
+tower             = "0.5"
+tower-http        = { version = "0.6", features = ["trace"] }
+tracing           = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+serde             = { version = "1", features = ["derive"] }
+serde_json        = "1"
+borsh             = { version = "1", default-features = false, features = ["derive"] }
+clap              = { version = "4", features = ["derive", "env"] }
+anyhow            = "1"
+thiserror         = "1"
+chacha20poly1305  = "0.10"
+hkdf              = "0.12"
+sha2              = "0.10"
+zeroize           = { version = "1", features = ["derive"] }
+rand              = "0.8"
+hex               = "0.4"
+cryptoki          = { version = "0.7", optional = true }
+
+[features]
+hsm = ["cryptoki"]
+
+[dev-dependencies]
+reqwest           = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "blocking", "json"] }
+tempfile          = "3"
+rcgen             = "0.13"
+
+[lints]
+workspace = true

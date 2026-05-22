@@ -1,0 +1,47 @@
+[package]
+name              = "tardus-wallet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license-file.workspace = true
+publish.workspace = true
+description       = "TARDUS user-side wallet SDK: multi-validator orchestrator for issuance and refresh ceremonies over HTTPS."
+
+[[bin]]
+name = "tardus-wallet"
+path = "src/bin/wallet.rs"
+
+[dependencies]
+tardus-core    = { path = "../tardus-core" }
+tardus-mint    = { path = "../tardus-mint" }
+tardus-refresh = { path = "../tardus-refresh" }
+tardus-client  = { path = "../tardus-client" }
+reqwest        = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "json"] }
+serde          = { version = "1", features = ["derive"] }
+serde_json     = "1"
+hex            = "0.4"
+rand           = "0.8"
+tokio          = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+futures        = { version = "0.3", default-features = false, features = ["std", "alloc"] }
+anyhow         = "1"
+thiserror      = "1"
+tracing        = "0.1"
+bip39          = { version = "2", features = ["rand"] }
+zeroize        = { version = "1", features = ["derive"] }
+borsh          = { version = "1", features = ["derive"] }
+curve25519-dalek = { version = "4", features = ["alloc", "zeroize", "rand_core", "precomputed-tables", "digest"] }
+chacha20poly1305 = "0.10"
+hkdf           = "0.12"
+sha2           = "0.10"
+clap           = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tardus-validator = { path = "../tardus-validator" }
+tempfile         = "3"
+tokio            = { version = "1", features = ["rt-multi-thread", "macros", "process"] }
+rand_chacha      = "0.3"
+reqwest          = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "json", "blocking"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,33 @@
+\section{Related work}
+\label{sec:related-work}
+
+\subsection{Chaumian e-cash systems}
+
+Cashu~\cite{cashu} is the closest active project to TARDUS in protocol design. It uses blind Diffie--Hellman with a single mint (no threshold), targets Bitcoin Lightning rather than a smart-contract chain, and recently introduced a NUT-13 deterministic-seed extension whose attack surface (an adversary mint that can derive coin secrets after the fact) we deliberately avoided. GNU Taler~\cite{dold2019} is the academic ancestor: it pioneered the cut-and-choose refresh, uses a single mint, and targets a settlement layer that the user trusts. TARDUS borrows Taler's $\kappa$-fold cut-and-choose verbatim and lifts the mint to a threshold setting.
+
+Neither Cashu nor Taler runs on a public smart-contract chain. The on-chain pieces of TARDUS --- the bearer model, the ed25519 precompile bridge, the realloc 10\,KB cap, the sponsor pool --- are not visible in those designs because the substrates are different.
+
+\subsection{Zero-knowledge privacy on Solana}
+
+Light Protocol~\cite{lightprotocol} offers compressed accounts on Solana through a Groth16-based system. It is the dominant tool when an application needs sender-receiver hiding and is willing to pay the per-circuit trusted setup and the 900\,k-CU price. Aztec-style ZK rollups~\cite{aztec} target Ethereum but their architectural patterns (UTXO model, Merkle-tree state, recursive proofs) influence the broader Solana zk landscape.
+
+TARDUS does not compete with these tools on full hiding; it competes on the cost dimension. Our 67\,k CU per Refresh (\Cref{tab:cu}) is about an order of magnitude cheaper than a ZK-rollup spend, and we avoid the trusted-setup ceremony entirely. The trade is that anonymity sets are per-denomination, not full.
+
+\subsection{Confidential transfers and Token-2022}
+\label{sec:related-conf-mint}
+
+Solana's Token-2022 program ships a Confidential Transfer extension~\cite{token2022confidential} that encrypts amounts under ElGamal and supports an optional auditor key. It provides full \emph{amount} privacy but no sender or receiver hiding: every confidential transfer still has a publicly visible payer and recipient on chain.
+
+TARDUS does the opposite: we hide sender, receiver, and the transaction graph, and leak per-coin denomination. The two are complementary. Our Faz E roadmap (deferred, about 19 engineering weeks) wires a Token-2022 ConfidentialMint as the vault layer, which closes the denomination leak too. The integration design is non-trivial: it raises the auditor-key question (whom does the auditor key belong to, and how is it managed?), requires range proofs on every confidential transfer, and roughly triples the CU per Withdraw. We have shipped the design document and scoped the work, but the wiring itself is for v1.5+.
+
+\subsection{Threshold blind signatures}
+
+The threshold blind Schnorr signature scheme we use is essentially Stinson--Strobl 2001~\cite{stinsonstrobl2001}, with a Komlo--Goldberg-style DKG~\cite{komlogoldberg2020} for the initial joint-key generation. FROST~\cite{komlogoldberg2020} itself does not address blindness; we adapt only its DKG and signing-share aggregation. Other threshold blind schemes exist (e.g., the Lindell 2017 ECDSA variant, the Doerner-Kondi-Lee-Shelat protocols) but Schnorr is the natural fit for Solana, where the ed25519 precompile is the cheapest path to on-chain signature verification.
+
+\subsection{Sealed-box AEAD}
+
+The construction we use is essentially NaCl's \texttt{crypto\_box\_seal}~\cite{nacl}, with three changes. First, the recipient identity is Ed25519 rather than native X25519; we convert via the RFC 7748 birational map. Second, the HKDF derivation binds the key and nonce to the ephemeral public key and the recipient public key, which lets us simulate the chosen-ciphertext oracle in the T7 reduction. Third, we ship the construction in two implementations (Rust and TypeScript) and validate wire-format equality in CI; this is the part that, to our knowledge, has not been done before for the \texttt{crypto\_box\_seal} family.
+
+\subsection{Fee-payer privacy stacks}
+
+Privacy of the on-chain fee payer is a well-known leak in account-model blockchains but is not, to our knowledge, treated systematically in any single privacy protocol. Tornado Cash~\cite{tornadocash} addresses it on Ethereum by funding the recipient's address out of the protocol, which is closer to a relayer model. Aztec's payment-on-chain primitives include a relayer marketplace. Our four-layer stack (ephemeral payer, multi-sponsor rotation, on-chain sponsor pool, pool caller rotation) is, we believe, the first treatment that composes all four layers on Solana specifically and that ships an empirical bound (Theorem T9) tied to the deposit-wallet count.

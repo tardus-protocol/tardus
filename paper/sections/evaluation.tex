@@ -1,0 +1,43 @@
+\section{Evaluation}
+\label{sec:evaluation}
+
+We report two kinds of measurements. The first is per-instruction compute-unit cost on Solana, which is a property of the protocol's on-chain surface and is the right number to compare against ZK-based alternatives. The second is an empirical witness for the fee-payer unlinkability theorem (\Cref{thm:T9}): an end-to-end demonstration in which a recipient wallet receives native SOL through a spend whose signer has no on-chain edge to the recipient's funding wallet.
+
+\subsection{Compute units}
+\label{sec:eval-cu}
+
+Solana meters program execution in compute units (CU). A transaction has 1.4\,M CU available, and the rule of thumb is that anything above 200\,k starts to feel expensive at peak load. \Cref{tab:cu} shows the measured cost of each of the six core protocol instructions, captured by running the on-chain program inside Solana's SBF virtual machine in the standard integration-test harness.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lr}
+\toprule
+Instruction & CU (measured) \\
+\midrule
+\texttt{Bootstrap} (per PDA kind) & 4\,200 \\
+\texttt{RegisterKeyset}            & 7\,800 \\
+\texttt{Deposit}                   & 5\,100 \\
+\texttt{Refresh}                   & 67\,400 \\
+\texttt{Withdraw}                  & 77\,000 \\
+\texttt{Revoke}                    & 8\,600 \\
+\bottomrule
+\end{tabular}
+\caption{Measured compute units per core instruction. Initial estimates made before the on-chain program was deployed were three to ten times higher; the table reflects the post-deployment numbers and is reproducible inside the SBF integration harness.}
+\label{tab:cu}
+\end{table}
+
+The Refresh and Withdraw paths dominate cost; their bulk comes from the ed25519 precompile invocation that verifies the surrendered coin's signature against the keyset's joint public key. Both fit comfortably under the per-transaction CU ceiling, with margin for paired instructions (the sponsor-pool payout, the recipient-side System transfer in Withdraw, the ed25519 precompile itself).
+
+\subsection{Empirical fee-payer unlinkability}
+\label{sec:eval-loop}
+
+We exercised the full protocol end-to-end on Solana devnet: bootstrap a vault for a fresh denomination, fund it with native SOL, register a freshly DKG-generated keyset, mint a coin via the off-chain blind-sign ceremony, deliver the coin to a recipient via a sealed-box payload through the relay layer, and have the recipient withdraw the underlying SOL to a fresh Solana wallet using an ephemeral payer funded from the on-chain sponsor pool.
+
+The recipient wallet's balance went from zero to a positive value over the Withdraw transaction. The Withdraw transaction was signed by a freshly-generated ephemeral keypair, funded a few hundred milliseconds earlier by an on-chain sponsor-pool payout. The ephemeral keypair signed exactly that one Withdraw and was then dropped. The recipient wallet, the sponsor wallet, and the ephemeral payer share no on-chain edge other than the abstract one (sponsor pool $\to$ ephemeral $\to$ Withdraw $\to$ recipient), and that edge runs through the pool's commingled balance rather than through a direct transfer.
+
+This is the strongest empirical evidence we can offer for the privacy claim. It is not a substitute for an external audit, but it demonstrates that the construction is real, that the four-layer fee-payer privacy stack composes as advertised, and that real economic value moves through the system end-to-end. The Theorem T9 bound of $1/|\mathcal{F}|$ (\Cref{thm:T9}) was honoured: with five distinct deposit wallets in the pool at the time of the demonstration, an on-chain graph adversary's direct-link probability is roughly $20\%$, dropping below $1\%$ once the deposit-wallet count exceeds one hundred under typical mainnet cadence.
+
+\subsection{What we did not measure}
+
+We did not measure protocol throughput under sustained adversarial load. The six-round refresh ceremony, with $\kappa = 32$, takes about $800\,\text{ms}$ per spend on commodity hardware against a small local validator set; we have not stress-tested the wider validator population against either honest concurrent users or a denial-of-service adversary. Relay throughput is similarly unmeasured: the SQLite-backed inbox handles single-digit messages per second comfortably in smoke tests, but the upper bound is unknown. Both are tasks for a Phase 5 mainnet deployment that we have not started.

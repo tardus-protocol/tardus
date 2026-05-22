@@ -1,0 +1,495 @@
+\section{Failure Modes and Recovery}
+\label{sec:failure-modes}
+
+This section catalogues the failure modes TARDUS is designed to survive,
+specifies the recovery procedure for each, and documents the residual
+classes that operators must monitor for. The catalogue is the operational
+counterpart of \S7's adversary model: \S7 says \emph{which adversaries
+the protocol resists}, \S8 says \emph{what happens when something actually
+goes wrong} and \emph{how to detect and recover}.
+
+Failure modes are grouped by origin: validator-side (\S8.1),
+user-side (\S8.2), protocol-level adversarial (\S8.3), and
+network-level (\S8.4). Each entry lists \textit{Trigger},
+\textit{User-facing consequence}, \textit{Recovery}, and
+\textit{Detection signal}.
+
+\subsection{Validator-Side Failure Modes}
+\label{sec:failure-validator}
+
+\paragraph{F1 --- Single validator crash.}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] One of the $n$ mint operators is offline (hardware
+    fault, network drop, process restart).
+  \item[Consequence] If the remaining online operators number $\geq t$,
+    the mint continues to issue, refresh, and rotate normally; the
+    offline operator simply does not contribute to active sessions.
+    If online $< t$, all new issuance and refresh sessions stall;
+    \emph{withdrawals} continue without disruption (on-chain only).
+  \item[Recovery] The crashed operator restarts, loads its persistent
+    share state from encrypted disk (\S3.1 HSM-mediated storage),
+    and rejoins the next ceremony. No share regeneration required.
+  \item[Detection] Operator heartbeat absent from the transparency log
+    for $>$ 30 s. The validator daemon (Faz 2) publishes a liveness
+    signal every 10 s; three consecutive misses raise an operator
+    on-call alert.
+\end{description}
+
+\paragraph{F2 --- Validator network partition.}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] A network split isolates a subset $P \subsetneq [n]$
+    of operators from the rest.
+  \item[Consequence] If $|P| < t$ and $|[n] \setminus P| \geq t$,
+    the majority side continues; minority side stalls.
+    If both sides are $\geq t$, neither side should sign autonomously
+    (a brain-split risk for the joint key). The validator daemon's
+    quorum check enforces this: each side independently observes
+    the other side's absence and pauses.
+  \item[Consequence (rare)] If both sides are $\geq t$ and both ignore
+    the quorum check (operator misconfiguration), both sides can issue
+    valid signatures under the same joint key, creating fork-style
+    double-issuance. This is operationally catastrophic but the
+    protocol still rejects on-chain double-spend (T3) — the conflict
+    surfaces at the first user who tries to spend two coins that
+    happen to share a nullifier ancestry. Recovery requires a manual
+    reconciliation against the transparency log.
+  \item[Recovery] Partition heals → next ceremony auto-resumes. If
+    forked-issuance occurred, manual epoch rotation via a key-revoke
+    + re-register cycle (\S5.3) under committee consensus.
+  \item[Detection] Cross-side keepalive failure → operator on-call;
+    automated quorum-check pause is the first line of defence.
+\end{description}
+
+\paragraph{F3 --- HSM failure.}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] An operator's FIPS 140-2 Level 3 HSM (\S3.1) hardware
+    fails or the key wrap protocol detects tampering.
+  \item[Consequence] That operator can no longer participate; treat as
+    F1 (single-validator-crash) extended.
+  \item[Recovery] Replace the HSM, re-initialise with a fresh share
+    derived from a proactive reshare (\S3.7). The reshare protocol's
+    zero-polynomial property (T5) means the joint key is preserved
+    and the failed operator's old share becomes useless — even if
+    later recovered from the failed HSM. Operator's share is replaced
+    in-epoch; no user-facing impact beyond F1-class downtime.
+  \item[Detection] HSM self-test failure; share key derivation
+    refuses to produce a result.
+\end{description}
+
+\paragraph{F4 --- Single share material leak.}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] One operator's share leaves the HSM boundary
+    (insider attack, side channel, memory dump).
+  \item[Consequence] By T1, no signature forgery yet (leaked share
+    counts toward the $t-1$ tolerated minority).
+  \item[Recovery] Immediate proactive reshare (\S3.7); the leaked share
+    becomes useless one epoch later. The transparency log records the
+    rotation event for auditability.
+  \item[Detection] HSM audit log shows export attempt; or threat intel
+    feed flags the leaked material. This is the hardest mode to
+    detect — the operator-side organisational controls (background
+    checks, dual-control share access, off-site backup) are the
+    primary mitigation.
+\end{description}
+
+\paragraph{F5 --- $t-1$ share leak.}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] $t-1$ operators' shares leak simultaneously (concerted
+    insider attack, supply-chain compromise).
+  \item[Consequence] Adversary at boundary of T1; needs one more
+    share to forge.
+  \item[Recovery] Emergency reshare, on-chain key revoke
+    (\texttt{Revoke} instruction, \S5.3), and re-register with a fresh
+    DKG. All in-flight issuance pauses; existing coins remain valid
+    (their signature was produced before the leak).
+  \item[Detection] Multiple HSM audit log anomalies in a window;
+    correlation with operator personnel events.
+\end{description}
+
+\paragraph{F6 --- $t$ or more share leak (catastrophic).}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] $\geq t$ operators' shares leak (or $t$ operators
+    actively collude).
+  \item[Consequence] Joint secret $x$ reconstructable via Lagrange
+    interpolation (\S3.6); adversary can forge arbitrary coins
+    under that joint key. T1 no longer holds for the affected epoch.
+  \item[Recovery] On-chain revocation of the compromised keyset
+    (\texttt{Revoke} instruction freezes new spends), forensic audit,
+    user-side claim against the vault collateral (\S8.6 outlines the
+    governance process for slashing the compromised operators' bonds
+    if applicable). \emph{No protocol-level rollback}: existing
+    transactions in the chain are not reversed.
+  \item[Detection] Anomalous issuance volume; on-chain analytics flag
+    a spike in newly registered nullifiers without matching
+    pre-deposit transfers.
+\end{description}
+
+\subsection{User-Side Failure Modes}
+\label{sec:failure-user}
+
+\paragraph{F7 --- Lost coin material.}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] User deletes or loses their wallet's coin record
+    (the $(x, Cp, \sigma)$ triple).
+  \item[Consequence] The coin's collateral becomes irretrievable
+    \emph{unless} the user holds the AEAD-encrypted backup
+    (\S6 wallet layer, \texttt{backup.rs}). TARDUS coins are bearer
+    instruments: there is no protocol-level recovery from loss.
+  \item[Recovery] Restore from \texttt{seal\_backup}/\texttt{open\_backup}
+    using the BIP-39 mnemonic-derived master seed (\S6.4 wallet
+    backup). If the user has no backup, the coin's lamports remain
+    locked in the vault, unspendable, until the protocol's collateral
+    expiry rule (operationally: never; the vault retains them
+    indefinitely as overcollateralisation).
+  \item[Detection] User-side only; the protocol has no view into
+    wallet contents.
+\end{description}
+
+\paragraph{F8 --- Wallet device theft.}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] User's device is stolen with unencrypted coin store.
+  \item[Consequence] Thief can spend any unspent coin (bearer model).
+  \item[Recovery] User submits \texttt{Refresh} transactions for every
+    coin they remember (race against the thief). The first to reach
+    the on-chain nullifier set wins.
+  \item[Detection] User-side only; consider hardware-wallet integration
+    (Faz 3 wallet roadmap) for stronger device-level mitigation.
+\end{description}
+
+\paragraph{F9 --- Failed refresh session.}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] Network drop, validator partition (F2), or user
+    timeout during the 6-round refresh protocol (\S4).
+  \item[Consequence] If the session aborted \emph{before} Round 3
+    (mint's challenge), the user retains the old coin intact and may
+    retry. If aborted \emph{after} Round 5 (mint's signed reveal),
+    the user holds an unfinalised new coin but the old coin is
+    nullified on chain — the user must complete Round 6 (off-chain
+    unblind) using the persisted refresh-session state from
+    \texttt{tardus-client::backup.rs} to recover the new coin.
+  \item[Recovery] The wallet persists per-session state on every round
+    transition; on restart it reads the state and resumes from the
+    last completed round.
+  \item[Detection] User-facing wallet timeout; the session state
+    encodes its own progress.
+\end{description}
+
+\paragraph{F10 --- Refresh session race (network reordering).}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] Two refresh sessions on the same coin (e.g.\ retry
+    of a session whose status is unclear) reach the on-chain program
+    in different orders across validators.
+  \item[Consequence] First-to-finalise wins; the second aborts with
+    \texttt{ERR\_DOUBLE\_SPEND} (T3). User-facing: they hold one valid
+    new coin instead of two.
+  \item[Recovery] None needed; this is the intended atomic behaviour.
+    The CLI's preflight nullifier check (\texttt{tardus devnet refresh})
+    surfaces the duplicate before the second TX pays a fee.
+  \item[Detection] CLI preflight; or post-finalisation \texttt{Refresh}
+    transaction error.
+\end{description}
+
+\subsection{Protocol-Level Adversarial Failures}
+\label{sec:failure-adversarial}
+
+\paragraph{F11 --- DKG ceremony cheater.}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] During DKG, one or more operators publish broadcasts
+    inconsistent with the shares they send privately (deviating from
+    \S3.5).
+  \item[Consequence] Honest operators detect the inconsistency via the
+    dual-commitment check ($C_{i,0} = A_{i,0}$ in canonical form
+    over both bases $G$ and $H$). The ceremony aborts before any
+    operator commits to a final share.
+  \item[Recovery] Restart DKG with the cheater excluded; publish the
+    cheating proof to the transparency log.
+  \item[Detection] Automatic during DKG round 2 validation.
+\end{description}
+
+\paragraph{F12 --- Reshare cheater (non-zero polynomial).}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] During proactive reshare (\S3.7), an operator's
+    delta-polynomial $\tilde{f}_i$ has $\tilde{f}_i(0) \neq 0$
+    (which would shift the joint key).
+  \item[Consequence] Honest operators detect via the
+    $\tilde{A}_{i,0} = \mathcal{O}$ check (added in v1.4.3 spec
+    discovery). The reshare aborts; old shares remain valid for
+    the current epoch.
+  \item[Recovery] Restart reshare excluding the cheater; operators'
+    next-epoch keyset rotation is delayed by one cycle.
+  \item[Detection] Automatic during reshare validation.
+\end{description}
+
+\paragraph{F13 --- On-chain instruction spam (DoS).}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] Adversary submits high-volume invalid \texttt{Refresh}
+    or \texttt{Withdraw} transactions to exhaust validator compute.
+  \item[Consequence] Solana's transaction fee market increases TX cost
+    during congestion; honest users pay more but the protocol remains
+    available (per-instruction CU is bounded at $\sim$73k, well within
+    the 200k default budget, so an attacker cannot cheap-spam).
+  \item[Recovery] Solana's fee dynamics auto-rate-limit; no protocol
+    action required.
+  \item[Detection] Standard Solana RPC metrics.
+\end{description}
+
+\paragraph{F14 --- Nullifier-set capacity exhaustion.}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] The Borsh-encoded \texttt{NullifierSet} PDA reaches its
+    8\,KiB allocation cap ($\approx 250$ entries).
+  \item[Consequence] New \texttt{Refresh} and \texttt{Withdraw}
+    transactions fail with \texttt{ERR\_ACCOUNT\_DATA\_TOO\_SMALL}.
+  \item[Recovery] v1.4.13 migration to Light Protocol's compressed
+    Merkle tree raises capacity to $2^{32}$ leaves with constant
+    on-chain storage (root only). Until then, operators monitor
+    nullifier count and reallocate the PDA (a one-time event for
+    the lifetime of the deployment, since the BPF Loader Upgradeable
+    permits account-data reallocation by the program authority).
+  \item[Detection] \texttt{tardus devnet info} reports nullifier count;
+    threshold-based alerting at 80\% of capacity.
+\end{description}
+
+\subsection{Network-Level Failures}
+\label{sec:failure-network}
+
+\paragraph{F15 --- Solana network outage.}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] Solana mainnet halts (block production stops).
+  \item[Consequence] No new \texttt{Refresh} or \texttt{Withdraw}
+    transactions land; existing coins remain valid; the mint
+    committee continues to issue off-chain (issuance does not
+    require on-chain TX). Withdrawals stall.
+  \item[Recovery] Resume when Solana production resumes; pending
+    transactions are picked up automatically by the validator
+    daemon's retry queue.
+  \item[Detection] Solana RPC reports stale slot height; transparency
+    log records the pause.
+\end{description}
+
+\paragraph{F16 --- Solana chain reorganisation past finality.}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] An unprecedented Solana consensus event reorganises
+    blocks at depth $\geq 32$ (the safety boundary in A6).
+  \item[Consequence] Catastrophic for any Solana program; TARDUS
+    inherits the network's safety property. T3 and T6 fail if A6
+    fails.
+  \item[Recovery] Coordinated with Solana ecosystem; nothing TARDUS
+    can do unilaterally.
+  \item[Detection] Solana RPC reports finalised-block divergence;
+    network-wide alert.
+\end{description}
+
+\paragraph{F17 --- Token-2022 program bug (post-v1.4.12).}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] A bug in Solana's Token-2022 program affects the
+    Confidential Mint extension (v1.4.12+).
+  \item[Consequence] Vault SPL operations may revert or, worse, leak
+    amounts that should be encrypted. v1.4.12 will document the
+    explicit dependence on Token-2022 invariants.
+  \item[Recovery] Coordinate with Solana Labs; pause vault operations
+    via \texttt{Revoke} until the upstream fix is deployed.
+  \item[Detection] Standard SPL ecosystem alerting.
+\end{description}
+
+\paragraph{F18 --- Malicious RPC node.}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] User's RPC provider returns stale or fabricated
+    account data.
+  \item[Consequence] CLI preflight check (\texttt{query-nullifier})
+    could miss an already-inserted nullifier, leading to a wasted
+    TX fee when the on-chain check catches it. The on-chain check
+    always wins (T3), so no double-spend risk.
+  \item[Recovery] Multi-RPC verification (Faz 3 wallet roadmap); or
+    user-side fallback to the validator committee's own RPC.
+  \item[Detection] Cross-RPC discrepancy alarms; user-facing warning.
+\end{description}
+
+\subsection{Relay-Layer Failure Modes}
+\label{sec:failure-relay}
+
+The relay layer (\Cref{sec:relay}) introduces its own operational
+F-modes catalogued as R1--R7 in \Cref{sec:relay-failure-modes}.
+Cross-referenced summary:
+
+\paragraph{R1 --- Relay process crash.} F1-class extension: with
+v5.4 \texttt{SQLite} persistence (\Cref{sec:relay-storage}) the
+in-flight inbox survives restart; the validator-side equivalent of
+F1's ``operator restart'' applies directly.
+
+\paragraph{R2 --- Relay disk full.} F1-class extension: \texttt{SQLite}
+writes fail $\to$ POST returns HTTP 5xx $\to$ sender's wallet
+retries with backoff. No coin-side state damage.
+
+\paragraph{R3 --- Relay operator payload inspection.} Mitigated by
+the v5.6 sealed-box payload format (\Cref{sec:relay-payload}):
+the relay cannot recover coin material under T7. A relay-side audit
+still sees recipient pubkey, timestamps, ciphertext sizes (traffic
+metadata) — Tor/I2P circuiting is the deployment-time defence.
+
+\paragraph{R4 --- Relay log seizure.} Same mitigation as R3: logs
+hold only opaque ciphertext + metadata.
+
+\paragraph{R5 --- Inbox exhaustion attack.} F13-class extension: a
+malicious sender deposits up to \texttt{max\_per\_recipient} entries
+on the victim's inbox. The v5.6 mitigation is the per-recipient cap
+(503 on overflow) + TTL-based eviction. Long-term mitigation is a
+fee market (deferred to v5.7).
+
+\paragraph{R6 --- Recipient secret leaked.} F8-class extension to
+the wallet section: leak of the recipient's \texttt{recv\_sk}
+(\Cref{sec:wallet-recv-identity}) lets the attacker decrypt all
+ciphertexts addressed to that pubkey, past and future. The wallet
+mnemonic is therefore the security root for both coin custody and
+P2P payload privacy.
+
+\paragraph{R7 --- Sender IP fingerprinting.} Not modelled in v5; a
+relay-side packet sniffer can link a recipient pubkey to a sender IP.
+Production deployments are expected to circuit sender wallets
+through Tor or a privacy-respecting VPN before reaching the relay.
+
+\subsection{HSM-Backend Failure Modes}
+\label{sec:failure-hsm}
+
+The v2.11 PKCS\#11 backend
+(\Cref{sec:mint-validator-daemon}) introduces failure modes that the
+v2.1 file backend did not have. These extend F3 (HSM failure):
+
+\paragraph{F3a --- PKCS\#11 module path missing.}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] \texttt{--hsm-module} points to a missing or
+    incompatible \texttt{.so}.
+  \item[Consequence] Validator boot fails with explicit
+    \texttt{Error::Config}; no shares ever loaded.
+  \item[Recovery] Fix path; rotate operator if the wrong module was
+    deployed.
+\end{description}
+
+\paragraph{F3b --- PKCS\#11 user PIN rotated upstream.}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] HSM operator rotates the user PIN through the
+    HSM-vendor management console without updating the validator's
+    config.
+  \item[Consequence] Validator boot fails at the login step
+    (\texttt{C\_Login} returns \texttt{CKR\_PIN\_INCORRECT}); no
+    silent fallback.
+  \item[Recovery] Sync new PIN; validator restart.
+\end{description}
+
+\paragraph{F3c --- Wrap key deleted on the HSM.}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] Operator misclick or HSM tenancy event removes the
+    AES wrap key (\texttt{CKA\_LABEL = tardus-wrap-v1}).
+  \item[Consequence] All on-disk \texttt{share\_*.bin} files become
+    permanently undecryptable; the affected validator must
+    re-participate in a reshare to obtain a fresh share. This is
+    F4-class for the affected validator but does not compromise the
+    threshold.
+  \item[Recovery] Reshare under existing \texttt{joint\_pk}; the
+    re-keyed validator picks up its new share from the reshare
+    transcript.
+\end{description}
+
+\paragraph{F3d --- HSM clock or session timeout.}
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[Trigger] HSM enforces session lifetime; the
+    \texttt{Pkcs11ShareStore}'s long-held session is invalidated.
+  \item[Consequence] Next \texttt{C\_Encrypt}/\texttt{C\_Decrypt}
+    fails with \texttt{CKR\_SESSION\_HANDLE\_INVALID}.
+  \item[Recovery] v2.12 will add automatic session re-open on
+    timeout; v2.11 requires validator restart.
+\end{description}
+
+\subsection{Detection and Monitoring Discipline}
+\label{sec:failure-monitoring}
+
+The full failure-mode catalogue above is operationalised through three
+observation channels:
+
+\begin{enumerate}[leftmargin=2em,itemsep=0pt]
+  \item \textbf{Transparency log.} Append-only, hash-chained log
+    published by the mint committee, recording every DKG round,
+    every reshare event, every keyset registration/revocation, and
+    every operator heartbeat. Anyone can replay the log to verify
+    committee behaviour. F1, F2, F4, F5, F11, F12 surface here.
+  \item \textbf{On-chain analytics.} Standard Solana indexers query
+    the program's account states. \texttt{tardus devnet info}
+    (\S6.5) is the minimal CLI front for this; richer dashboards
+    (Faz 3) will track nullifier-rate, vault-balance, and
+    keyset-registry growth. F6, F13, F14, F18 surface here.
+  \item \textbf{Operator alerting.} Per-validator daemon (Faz 2)
+    Prometheus-style metrics on heartbeat, share count, ceremony
+    participation, HSM health. F1, F2, F3, F4 surface here first.
+\end{enumerate}
+
+\subsection{Governance and Open Problems}
+\label{sec:failure-open}
+
+\paragraph{Slashing.} The current v1 protocol does not implement
+operator-bond slashing; F4-F6 recovery depends on out-of-band
+governance (e.g.\ legal action against an operator who leaked
+material). A v2 extension under consideration: operators post a
+collateral bond into a separate Solana PDA; the
+\texttt{Revoke} instruction can be augmented with a slashing
+parameter that diverts the bond to the vault as compensation. This is
+deferred to Faz 5.
+
+\paragraph{Cross-chain bridge attacks.} Coins denominated in
+bridged assets (e.g.\ Wormhole-wrapped tokens) inherit the bridge's
+security posture. TARDUS itself cannot defend against a bridge
+compromise. This will be addressed in the Faz 5 mainnet asset-class
+policy: only assets with native Solana issuance (SOL, Token-2022 mints
+with the issuer's signature attestation) qualify for the canonical
+TARDUS keyset; bridged assets get separate keysets with explicit
+risk disclosure.
+
+\paragraph{Post-quantum migration.} A1 (ECDLP) is broken by a
+sufficiently large quantum computer (Shor's algorithm, $\sim 4000$
+logical qubits). TARDUS will need a post-quantum signature primitive
+in that era; current candidates (Dilithium, Falcon) have $\sim 2$\,KB
+signatures, incompatible with the per-coin storage budget. The
+mitigation will be a parallel post-quantum keyset (separate
+\texttt{KeysetEntry} with a post-quantum algorithm marker), with the
+classical keyset deprecated over a multi-year migration window. See
+\S5 for the keyset registry's extensibility.
+
+\paragraph{Async secure messaging.} Faz 2's validator daemon needs
+authenticated, replay-protected, end-to-end-encrypted messaging
+between operators. The current design assumes TLS+mTLS over a
+private network; a fully decentralised alternative
+(libp2p, Iroh) is under evaluation.
+
+\subsection{Summary Table}
+\label{sec:failure-summary}
+
+\begin{center}
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+ID & Mode & Severity & Recovery class \\
+\midrule
+F1  & Single validator crash       & Low      & Operator restart (v2.X)         \\
+F2  & Validator network partition  & Medium   & Auto-quorum-pause; manual recon \\
+F3  & HSM failure                  & Low      & Reshare + replace               \\
+F4  & Single share leak            & Medium   & Proactive reshare               \\
+F5  & $t-1$ share leak             & High     & Emergency reshare + revoke      \\
+F6  & $\geq t$ share leak          & Catastrophic & On-chain revoke + audit     \\
+F7  & Lost coin material           & High (user) & AEAD backup restore          \\
+F8  & Wallet theft                 & High (user) & Race-refresh; HW wallet      \\
+F9  & Refresh session abort        & Low      & Wallet auto-resume              \\
+F10 & Refresh race                 & None     & First-finalised wins (T3)       \\
+F11 & DKG ceremony cheater         & Low      & Auto-detect + restart           \\
+F12 & Reshare cheater              & Low      & Auto-detect + restart           \\
+F13 & Instruction spam (DoS)       & Low      & Solana fee market               \\
+F14 & Nullifier capacity exhausted & Medium   & Reallocation; v1.4.13 Light tree \\
+F15 & Solana network outage        & Low      & Wait + auto-retry               \\
+F16 & Solana finality break        & Catastrophic & Ecosystem-wide              \\
+F17 & Token-2022 bug (v1.4.12+)    & Variable & Pause + upstream fix            \\
+F18 & Malicious RPC                & Low      & Multi-RPC verification          \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Of the 18 catalogued modes, 14 have automated detection and protocol-level
+recovery (F1-F3, F9-F18); 4 require human-in-the-loop response (F4-F8).
+This is the explicit operational surface the validator daemon (Faz 2)
+must instrument.

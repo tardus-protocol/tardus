@@ -1,0 +1,232 @@
+\section{Relay Layer}
+\label{sec:relay}
+
+This section specifies TARDUS's optional relay layer (\Cref{sec:wallet} §6
+referenced this layer as the canonical \emph{user-to-user delivery
+mechanism} for off-chain coin transmission). The relay is a stateless,
+TTL-bound, recipient-keyed mailbox: senders deposit ciphertexts addressed
+to a recipient public key, and recipients poll. The relay never holds
+key material and (under the v5.6 sealed-box payload format) never sees
+plaintext coin material.
+
+\subsection{Design Objectives}
+\label{sec:relay-objectives}
+
+\begin{description}[leftmargin=2em,style=nextline,itemsep=0pt]
+  \item[O1 (recipient confidentiality)] A relay operator must not learn
+    coin material (secrets, signatures, denomination) even on a full
+    payload audit, except via decryption of the sealed-box payload —
+    which requires the recipient's ed25519 secret key.
+  \item[O2 (sender anonymity)] The relay must not authenticate the
+    sender. The POST endpoint accepts unauthenticated requests; the
+    only network-level identifier the relay sees is the connecting IP
+    (mitigated at deployment by Tor/I2P or VPN tunnelling — out of
+    scope for v5).
+  \item[O3 (bounded resources)] Per-recipient and per-payload caps
+    bound the relay's memory and disk usage; an oversized payload or
+    a full inbox is rejected at the HTTP layer with 400 / 503.
+  \item[O4 (eventual delivery)] Messages have a TTL (default 7 days);
+    expired entries are pruned by a background task. The TTL forces
+    recipients to poll within a bounded window; longer-term storage is
+    the wallet's responsibility.
+  \item[O5 (operator agnosticism)] The relay never inspects the
+    payload's contents and never participates in the mint or refresh
+    protocols. A relay outage delays delivery but cannot forge,
+    double-spend, or otherwise compromise coin security.
+\end{description}
+
+\subsection{Wire Protocol}
+\label{sec:relay-protocol}
+
+The relay exposes three HTTP endpoints, all under the canonical path
+\verb|/inbox/{recipient_pk_hex}|.
+
+\paragraph{POST /inbox/\{recipient\_pk\_hex\}} — anonymous deposit.
+
+\begin{description}[leftmargin=2em,itemsep=0pt]
+  \item[Request]
+    \verb|{ "payload_hex": "<bytes>", "ttl_secs": optional u64 }|
+  \item[Response 200]
+    \verb|{ "id": "<16-byte hex>", "payload_hex": "...", "received_at_unix_ms": u64, "expires_at_unix_ms": u64 }|
+  \item[Response 400] payload exceeds \verb|--max-payload-bytes|, or
+    \verb|recipient_pk_hex| not 32 bytes of hex.
+  \item[Response 503] inbox full for this recipient
+    (\verb|--max-per-recipient| reached).
+\end{description}
+
+\paragraph{GET /inbox/\{recipient\_pk\_hex\}} — recipient polls.
+
+\begin{description}[leftmargin=2em,itemsep=0pt]
+  \item[Response 200]
+    \verb|{ "messages": [{ id, payload_hex, received_at_unix_ms, expires_at_unix_ms }, ...] }|
+  \item[Response 400] \verb|recipient_pk_hex| malformed.
+\end{description}
+
+\paragraph{DELETE /inbox/\{recipient\_pk\_hex\}/\{message\_id\}} —
+recipient marks consumed.
+
+\begin{description}[leftmargin=2em,itemsep=0pt]
+  \item[Response 200] \verb|{ "removed": bool }|
+\end{description}
+
+\paragraph{Operator endpoints.} \verb|GET /health| (uptime, deposits
+total, fetches total, messages inflight) and \verb|GET /info|
+(operator name, bind addr, caps, default TTL) for monitoring; no
+mutation, no auth required.
+
+\subsection{Payload Format}
+\label{sec:relay-payload}
+
+The wire-level \verb|payload_hex| is opaque to the relay. Two formats
+coexist in v5.6:
+
+\paragraph{Plain JSON (v5.3, deprecated for production).} The wallet
+JSON-encodes
+\[
+  \{\,\texttt{coin\_secret},\,\texttt{coin\_pubkey},\,\texttt{coin\_signature},\,\texttt{denom},\,\texttt{memo}\,\}
+\]
+and hex-encodes the result. A relay operator with read access to the
+inbox can recover all coin material. Used only when the recipient is
+unable to consume sealed-box payloads (e.g. lightweight read-only
+audit clients).
+
+\paragraph{Sealed box (v5.6, default for production).} The payload is
+\[
+  \texttt{sealed\_blob} \;=\; \texttt{epk}\;(32)\;\|\;\texttt{ChaCha20\text{-}Poly1305(plaintext)}
+\]
+where the plaintext is the same JSON as above, the AEAD key is derived
+via the NaCl \verb|crypto_box_seal| construction adapted for ed25519
+recipient keys:
+
+\begin{enumerate}[leftmargin=2em,itemsep=0pt]
+  \item Sender samples ephemeral X25519 keypair $(esk, epk)$.
+  \item Recipient's ed25519 pubkey $\to$ Montgomery form via RFC 7748
+        §5 (the Edwards-to-Montgomery birational map).
+  \item Shared secret $ss = esk \cdot \mathsf{recipient}_{X25519}$.
+  \item $(K, N) =
+        \mathsf{HKDF\text{-}SHA\text{-}256}(\,\mathsf{salt}=\texttt{"TARDUS-sealed-box-v1"},\,
+                                            \mathsf{ikm}=ss,\,
+                                            \mathsf{info}=epk \,\|\, \mathsf{recipient}_{X25519}\,)$.
+  \item $\mathsf{ciphertext} =
+        \mathsf{ChaCha20\text{-}Poly1305}(K, N, \mathsf{plaintext})$.
+\end{enumerate}
+
+Recipient inverts steps 1–4 using its own ed25519 secret key (also
+canonical scalar, converted to X25519 scalar) and then runs the
+matching $\mathsf{ChaCha20\text{-}Poly1305\text{-}Decrypt}$.
+
+\subsection{Storage Backends}
+\label{sec:relay-storage}
+
+The relay's \verb|InboxStore| dispatches to one of two backends, chosen
+at boot via the \verb|--storage-path| CLI flag.
+
+\paragraph{In-memory backend (default).} \verb|HashMap<RecipientPk, Vec<StoredMessage>>|
+behind a \verb|std::sync::Mutex|. Messages are lost on restart. Suited
+to ephemeral testing and short-lived federation peers.
+
+\paragraph{SQLite backend (production).} Bundled SQLite (no system
+dependency), schema:
+
+\begin{verbatim}
+CREATE TABLE messages (
+    id                  TEXT PRIMARY KEY,
+    recipient           BLOB NOT NULL,
+    payload_hex         TEXT NOT NULL,
+    received_at_unix_ms INTEGER NOT NULL,
+    expires_at_unix_ms  INTEGER NOT NULL
+);
+CREATE INDEX idx_recipient ON messages(recipient);
+CREATE INDEX idx_expires   ON messages(expires_at_unix_ms);
+\end{verbatim}
+
+The two indices give $O(\log n)$ recipient-bucket scans and $O(\log n)$
+TTL-prune scans even at $10^6+$ inflight messages.
+
+\paragraph{TTL pruning.} A Tokio background task runs every $60\,\text{s}$
+and issues
+\verb|DELETE FROM messages WHERE expires_at_unix_ms <= now|
+on SQLite or retains-by-deadline on the in-memory backend. Prune is
+side-effect-free: no event log emission, no recipient notification.
+
+\subsection{Transport Security}
+\label{sec:relay-tls}
+
+Production relays MUST run with TLS enabled. The daemon supports HTTPS
+via \verb|axum-server| + \verb|rustls 0.23| (ring backend); operator
+provides \verb|--tls-cert| and \verb|--tls-key| at boot. A relay with
+neither flag set serves plain HTTP and refuses to accept either flag in
+isolation (fail-fast misconfiguration check). v5.7 will add mTLS
+support for recipient cert-based authentication on GET / DELETE.
+
+\subsection{Security Argument}
+\label{sec:relay-security}
+
+\begin{theorem}[Sealed-box payload confidentiality]
+\label{thm:relay-confidentiality}
+Under assumption A1 (ECDLP) and the IND-CCA security of
+ChaCha20-Poly1305, an adversary controlling the relay operator and
+observing all inbox contents learns no information about the plaintext
+coin material beyond the bit-length of each ciphertext, except with
+probability $\leq \mathsf{Adv}^{\mathsf{IND\text{-}CCA}}_{\mathsf{ChaCha20\text{-}Poly1305}}(\lambda)
++ \mathsf{Adv}^{\mathsf{ECDLP}}_{X25519}(\lambda) + \negl(\lambda)$.
+\end{theorem}
+
+\paragraph{Reduction sketch.} The reduction is the standard
+\verb|crypto_box_seal| argument: the X25519 ECDH shared secret is
+indistinguishable from random under DDH (which reduces to ECDLP for
+the Curve25519 family), HKDF-SHA-256 is a PRF under ROM, and
+ChaCha20-Poly1305 is IND-CCA secure. Composition is via standard
+hybrid arguments.
+
+\paragraph{What the relay still learns.} The relay sees, for each
+deposit: the recipient pubkey (in the URL path), the deposit timestamp,
+the message TTL, and the ciphertext length. Traffic-analysis resistance
+against these side channels is a deployment concern (Tor/I2P circuit,
+fixed-size payload padding) and out of scope for v5.
+
+\paragraph{What an inbox-leak does \emph{not} compromise.}
+Critically, a relay compromise does not give the adversary:
+(a) the recipient's ed25519 secret key (held only by the recipient's
+wallet), (b) the sender's identity (no auth on POST), (c) the validator
+committee's joint secret (off-chain, held by validator daemons), or
+(d) any prior payments (no logging of forwarded message contents).
+
+\subsection{Failure Mode Mapping}
+\label{sec:relay-failure-modes}
+
+Cross-reference with \Cref{sec:failure-modes}: the relay layer's
+operational failure modes are extensions of the wallet/operator F-modes,
+not new categories.
+
+\begin{center}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+ID & Relay-layer scenario & Existing F-mode mapping \\
+\midrule
+R1 & Relay process crash       & F1-class (restart with persistent DB) \\
+R2 & Relay disk full           & F1-class extended (SQLite write fails → 5xx) \\
+R3 & Relay operator inspection & R-3 below (sealed-box mitigation) \\
+R4 & Relay log seizure         & R-3 same                                \\
+R5 & Inbox exhaustion attack   & F13-class (per-recipient cap, fee market) \\
+R6 & Recipient secret leaked   & F8-class (wallet theft) extended         \\
+R7 & Sender IP fingerprinting  & not modelled in v5 (Tor circuit at deploy) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{R-3 — relay operator payload inspection.} Mitigated by
+the v5.6 sealed-box payload format. A compromised or hostile relay
+operator can still observe recipient pubkeys and message metadata
+(deposit timing, ciphertext size, TTL choice), but cannot recover
+any coin secret or signature.
+
+\subsection{Federation (Forward Notice)}
+\label{sec:relay-federation}
+
+A single relay is a single point of failure for delivery. The v5.7
+federation extension will define a gossip protocol for relay-to-relay
+forwarding so a recipient can poll any peer relay and recover messages
+deposited at any federated relay. This is intentionally deferred until
+the single-relay deployment pattern is stable in production.

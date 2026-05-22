@@ -1,0 +1,192 @@
+\appendix
+
+\section{Reference Test Vectors}
+\label{sec:appendix-vectors}
+
+\paragraph{Purpose.} This appendix lists deterministic test
+vectors used by the cross-language (Rust + TypeScript)
+reference implementations. Any production or audit
+implementation MUST reproduce these outputs bit-equal from the
+given inputs. Source: \texttt{crates/tardus-wallet/src/mnemonic.rs}
++ \texttt{ts-sdk/src/mnemonic-rust-compat.ts}.
+
+License: TARDUS-PROPRIETARY-1.0.
+
+\subsection{BIP-39 \texorpdfstring{$\to$}{->} master seed}
+\label{sec:vec-master-seed}
+
+The canonical BIP-39 test mnemonic from the original BIP-39
+specification (Trezor reference, 12 words):
+
+\begin{center}\small
+\begin{tabular}{rl}
+\toprule
+\texttt{mnemonic}      & \texttt{abandon abandon abandon abandon abandon abandon} \\
+                       & \texttt{abandon abandon abandon abandon abandon about}   \\
+\texttt{passphrase}    & (empty string)                                            \\
+\texttt{master\_seed (TARDUS, first 32 bytes of PBKDF2 seed)} & \\
+                       & \texttt{5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc1} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Reproduce with:
+\begin{itemize}[leftmargin=2em,itemsep=0pt]
+  \item Rust: \texttt{tardus\_wallet::derive\_master\_seed(\&mnemonic, "")}.
+  \item TS: \texttt{deriveMasterSeed(phrase, '')} (v0.1, X25519 path) OR
+        \texttt{deriveMasterSeedRustCompat(phrase, '')} (v0.2,
+        Rust-compat).
+\end{itemize}
+
+\subsection{Master seed \texorpdfstring{$\to$}{->} receiving keypair (Rust + TS v0.2)}
+\label{sec:vec-recv-keypair}
+
+\begin{center}\small
+\begin{tabular}{rl}
+\toprule
+\texttt{master\_seed (input)} & \texttt{5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc1} \\
+\texttt{HKDF salt}            & ASCII \texttt{"TARDUS-recv-id-v1"} \\
+\texttt{HKDF info}            & ASCII \texttt{"ed25519-keypair"} \\
+\texttt{HKDF output length}   & 64 bytes (HKDF-SHA-512) \\
+\texttt{sk (canonical Ed25519 scalar, mod $\ell$)} & \\
+                              & \multicolumn{1}{l}{\textit{Deterministic; bit-equal Rust} } \\
+                              & \multicolumn{1}{l}{\textit{$\to$ TS v0.2.}} \\
+\texttt{pk (32-byte Edwards-compressed point)} & \\
+                              & \multicolumn{1}{l}{\textit{$= (sk \cdot G_{\mathrm{ed25519}}).\mathsf{compress}()$.}} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Cross-validate by running \texttt{cargo test -p tardus-wallet
+test\_canonical\_master\_seed} (Rust) and
+\texttt{node --test --experimental-strip-types ts-sdk/test/mnemonic.test.ts}
+(TS v0.1) or
+\texttt{ts-sdk/test/rust-compat.test.ts} (TS v0.2). The first 20
+hex characters of \texttt{master\_seed} are asserted in both
+languages' test suites as \texttt{5eb00bbddcf069084889}.
+
+\subsection{Sealed-box AEAD wire format}
+\label{sec:vec-sealed-box-wire}
+
+The wire format (32-byte ephemeral public key followed by
+AEAD ciphertext + 16-byte Poly1305 tag) is shared between Rust
+and TS v0.2.
+
+\begin{center}\small
+\begin{tabular}{rl}
+\toprule
+\texttt{offset 0..32}     & ephemeral public key $epk$ \\
+                          & (Curve25519 u-coordinate, little-endian) \\
+\texttt{offset 32..(N+48)} & \texttt{ChaCha20-Poly1305}$_{K,N}$\texttt{(plaintext)} \\
+                          & where $K$ (32 B) and $N$ (12 B) are HKDF-derived. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+HKDF inputs (both Rust and TS v0.2 MUST agree byte-for-byte):
+
+\begin{center}\small
+\begin{tabular}{rl}
+\toprule
+\texttt{salt}             & ASCII \texttt{"TARDUS-sealed-box-v1"} (20 bytes) \\
+\texttt{ikm (input keying material)} & ECDH shared secret \\
+                          & ($= esk \cdot pk_R^{(\mathrm{X25519})}$, 32 bytes) \\
+\texttt{info for key}     & ASCII \texttt{"chacha20poly1305-key"} $\,\|\,$ $epk$ $\,\|\,$ $pk_R^{(\mathrm{X25519})}$ \\
+\texttt{info for nonce}   & ASCII \texttt{"chacha20poly1305-nonce"} $\,\|\,$ $epk$ $\,\|\,$ $pk_R^{(\mathrm{X25519})}$ \\
+\texttt{key output length} & 32 bytes \\
+\texttt{nonce output length} & 12 bytes \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{TS v0.1 caveat.} The TS v0.1 path (\texttt{src/sealed-box.ts})
+uses X25519-clamped scalar derivation per RFC 7748 §5; its
+on-the-wire ciphertexts are NOT decryptable by the Rust
+reference. The v0.2 path
+(\texttt{src/sealed-box-rust-compat.ts}) uses the unclamped
+Curve25519 Montgomery ladder
+(\texttt{src/montgomery.ts}) and IS wire-byte-compatible.
+
+\subsection{Nullifier computation}
+\label{sec:vec-nullifier}
+
+The on-chain nullifier of a coin with public commitment $Cp$:
+
+\[
+  \mathsf{nullifier} \;=\; \mathsf{SHA\text{-}256}(\mathtt{"TARDUS-nullifier-v1"} \,\|\, Cp).
+\]
+
+Reproduce with
+\texttt{tardus\_program::processor::compute\_nullifier(\&cp\_bytes)}.
+
+\subsection{PDA seeds}
+\label{sec:vec-pda-seeds}
+
+Solana program-derived addresses for TARDUS PDAs are computed
+via \texttt{Pubkey::find\_program\_address(\&[\&str, ...], \&program\_id)}.
+Seeds:
+
+\begin{center}\small
+\begin{tabular}{rl}
+\toprule
+\texttt{KeysetRegistry}  & \texttt{["tardus", "keyset-registry"]}                       \\
+\texttt{NullifierTree}   & \texttt{["tardus", "nullifier-tree"]}                        \\
+\texttt{Vault}           & \texttt{["tardus", "vault", \&denom.to\_le\_bytes()]}          \\
+\texttt{SponsorPool}     & \texttt{["tardus", "sponsor-pool"]}                          \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+On devnet with the canonical program ID
+\texttt{AmY1ysgQyCC6CmorXkrNkogBSHmomy4kbsPziAYUx47u}, the
+KeysetRegistry PDA resolves to
+\texttt{4XJ8fmJgJEc9QhNWgNdw1xJHzs3cEZ6JhM746KWDpHK2}.
+Reproduce with
+\texttt{tardus devnet info --rpc https://api.devnet.solana.com}.
+
+\subsection{Ed25519 precompile envelope}
+\label{sec:vec-ed25519-precompile}
+
+The TARDUS \texttt{Refresh} and \texttt{Withdraw} instructions
+require an immediately-preceding ed25519 precompile instruction
+with the following 144-byte data layout (single-signature
+variant):
+
+\begin{center}\small
+\begin{tabular}{rl}
+\toprule
+\texttt{offset 0..1}    & \texttt{num\_signatures = 1}      \\
+\texttt{offset 1..2}    & \texttt{padding = 0}              \\
+\texttt{offset 2..4}    & \texttt{sig\_offset = 16} (u16 LE) \\
+\texttt{offset 4..6}    & \texttt{sig\_ix\_idx = 0xFFFF} (u16 LE) \\
+\texttt{offset 6..8}    & \texttt{pk\_offset = 80}          \\
+\texttt{offset 8..10}   & \texttt{pk\_ix\_idx = 0xFFFF}     \\
+\texttt{offset 10..12}  & \texttt{msg\_offset = 112}        \\
+\texttt{offset 12..14}  & \texttt{msg\_size = 32}           \\
+\texttt{offset 14..16}  & \texttt{msg\_ix\_idx = 0xFFFF}    \\
+\texttt{offset 16..80}  & 64-byte signature $\sigma$ on coin $Cp$ \\
+\texttt{offset 80..112} & 32-byte mint joint pubkey $\mathsf{joint\_pk}$ \\
+\texttt{offset 112..144} & 32-byte coin commitment $Cp$ (the message) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Reproduce with
+\texttt{crates/tardus-cli/src/commands/devnet.rs::build\_ed25519\_precompile\_data}
+or
+\texttt{crates/tardus-wallet-gui/src/runtime.rs::withdraw\_on\_devnet}.
+
+\subsection{\texorpdfstring{Solana realloc 10\,KB per-instruction cap (discovery \#10)}{Solana realloc 10 KB per-instruction cap (discovery 10)}}
+\label{sec:vec-realloc-cap}
+
+\texttt{AccountInfo::realloc(new\_size, true)} is bounded by
+\texttt{MAX\_PERMITTED\_DATA\_INCREASE = 10240 bytes} per single
+instruction call. Growing a PDA from 1024 bytes to 65536 bytes
+therefore requires
+$\lceil (65536 - 1024) / 10240 \rceil = 7$ sequential
+\texttt{ResizeAccount} instructions, each within its own
+transaction (or chained in a single transaction with multiple
+program calls). The CLI's
+\texttt{tardus devnet resize-nullifier-tree} subcommand handles
+the multi-transaction batching transparently; operators see a
+single high-level target size.

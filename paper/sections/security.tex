@@ -1,0 +1,108 @@
+\section{Security analysis}
+\label{sec:security}
+
+We state nine theorems. Six are inherited essentially from prior work and we cite the relevant proofs; three (T7, T8, T9) are new to this construction. T7 has a full reduction sketch here and an EasyCrypt skeleton in the specification appendix; T8 is an honest placeholder, since the deferred Token-2022 ConfidentialMint vault is not yet wired (\Cref{sec:related-conf-mint}); T9 is the fee-payer unlinkability claim with the empirical bound we measured on devnet.
+
+\subsection{T1 --- coin unforgeability}
+\label{sec:t1}
+
+\begin{theorem}[Coin unforgeability]
+\label{thm:T1}
+Under the discrete-log assumption on Curve25519 and the random-oracle assumption on SHA-256 used for the Schnorr challenge, no PPT adversary that has not participated in the threshold issuance ceremony can produce a coin $(C_p, \sigma)$ that verifies under $pk_{\mathrm{joint}}$, except with negligible probability.
+\end{theorem}
+
+The single-key case is Pointcheval--Stern~\cite{pointchevalstern1996} via the forking lemma. The threshold lift follows Stinson--Strobl~\cite{stinsonstrobl2001}: a corrupted-minority simulator reduces threshold unforgeability to single-key unforgeability. Our \texttt{spec/easycrypt/schnorr.ec} skeleton encodes the single-key case; \texttt{threshold\_lift.ec} sketches the reduction.
+
+\subsection{T2 --- issuance blindness}
+
+\begin{theorem}[Issuance blindness]
+\label{thm:T2}
+For any PPT mint adversary controlling $n - 1$ committee members and observing the entire issuance transcript, the post-unblinding pair $(C_p, \sigma)$ is statistically independent of the transcript, in the sense that the simulator's transcript distribution is identical to the real one.
+\end{theorem}
+
+This is the perfect-blinding property of blind Schnorr~\cite{chaum1982}: the blinding factor is uniform in $\mathbb{Z}_\ell$, so the post-unblinding pair is uniform conditional on the transcript. Our \texttt{blind.ec} skeleton encodes the blinding-factor algebra and proves zero statistical distance.
+
+\subsection{T3 --- double-spend prevention}
+
+\begin{theorem}[Double-spend prevention]
+\label{thm:T3}
+Once $(C_p, \sigma)$ has been surrendered in any on-chain Refresh or Withdraw, no second on-chain transaction can succeed on the same $C_p$.
+\end{theorem}
+
+This is an operational invariant of the on-chain program: \texttt{Refresh} and \texttt{Withdraw} both compute $\mathit{nullifier} = \operatorname{SHA-256}(\mathtt{"TARDUS-nullifier-v1"} \,\|\, C_p)$ and refuse if the nullifier is already in the set. The "bearer model" detail (computing the nullifier from $C_p$ rather than the secret scalar $x$) is what allows the check to run inside the SBF stack budget without dragging \texttt{curve25519-dalek} along.
+
+\subsection{T4 --- cut-and-choose soundness}
+
+\begin{theorem}[Cut-and-choose soundness]
+\label{thm:T4}
+A user attempting to obtain blind signatures on coin pairs that do not sum to the surrendered coin's denomination succeeds with probability at most $1/(\kappa + 1)$ per attempt.
+\end{theorem}
+
+Standard cut-and-choose~\cite{dold2019}. Encoded in \texttt{cut\_choose.ec}.
+
+\subsection{T5 --- reshare correctness}
+
+\begin{theorem}[Reshare correctness]
+\label{thm:T5}
+The proactive reshare protocol moves the committee from epoch $e$ shares to epoch $e + 1$ shares without changing $pk_{\mathrm{joint}}$ and without exposing the joint secret at any point.
+\end{theorem}
+
+Operational, follows the Komlo--Goldberg reshare~\cite{komlogoldberg2020} with the discovery-\#3 identity check ($\tilde{A}_0 = \mathcal{O}$) we documented in the specification.
+
+\subsection{T6 --- vault collateral invariant}
+
+\begin{theorem}[Vault collateral invariant]
+\label{thm:T6}
+At every finalised slot, the per-denomination vault PDA's lamport balance equals the denomination times the count of active coins not yet refreshed or withdrawn.
+\end{theorem}
+
+Operational, audit-anyone-can-run-it. The on-chain program enforces it instruction by instruction. T6 is the property that justifies our claim that anyone with a Solana RPC endpoint can audit TARDUS in real time.
+
+\subsection{T7 --- sealed-box payload confidentiality}
+\label{sec:t7}
+
+\begin{theorem}[Sealed-box IND-CCA]
+\label{thm:T7}
+The TARDUS sealed-box AEAD is IND-CCA secure in the random-oracle model. For any PPT adversary $\mathcal{A}$ controlling the relay operator,
+\[
+  \operatorname{Adv}^{\mathrm{IND\text{-}CCA}}_{\mathsf{SB}}(\mathcal{A}) \leq
+  \operatorname{Adv}^{\mathrm{IND\text{-}CCA}}_{\mathsf{ChaCha20\text{-}Poly1305}}(\mathcal{B}_1) +
+  \operatorname{Adv}^{\mathrm{ECDLP}}_{X25519}(\mathcal{B}_2) +
+  q_H / 2^{256} + \mathit{negl}(\lambda),
+\]
+where $q_H$ is the number of HKDF queries.
+\end{theorem}
+
+The reduction composes three hops. First, replace the genuine ECDH shared secret with a uniformly random one; the cost is an ECDLP advantage on Curve25519. Second, the HKDF-derived $(K, N)$ pair is statistically uniform up to a $q_H / 2^{256}$ collision factor. Third, any IND-CCA distinguisher on the sealed-box reduces directly to an IND-CCA distinguisher on the ChaCha20-Poly1305 AEAD. The full mechanisation is in \texttt{spec/easycrypt/sealed\_box.ec}. The chosen-ciphertext oracle is satisfied because the AEAD layer enforces it; the relay operator never sees plaintext.
+
+\subsection{T8 --- confidential vault indistinguishability (placeholder)}
+
+\begin{theorem}[Confidential vault indistinguishability, deferred]
+\label{thm:T8}
+Under the Token-2022 ConfidentialMint vault (v1.5+), the on-chain encrypted balance commitments hide the vault's SOL balance up to an ElGamal IND-CPA advantage plus a range-proof soundness advantage.
+\end{theorem}
+
+We state T8 for completeness but it is \emph{not provable on the v1 plain-SOL vault}: today's vault balance is publicly visible. T8 becomes meaningful only after the ConfidentialMint migration (\Cref{sec:related-conf-mint}), which we have scoped at roughly 19 engineering weeks. The reason we include the statement now is to lock the audit firm's expected formal-verification surface area pre-engagement, so the Phase 4 contract can reference T8 by name.
+
+\subsection{T9 --- fee-payer unlinkability}
+\label{sec:t9}
+
+\begin{theorem}[Fee-payer unlinkability]
+\label{thm:T9}
+Let $\mathcal{P}$ be the set of TARDUS spend-class transactions inside an observation window $W$, each funded through the on-chain sponsor pool, and let $\mathcal{F}$ be the set of distinct funder wallets whose deposits arrived inside the same window. For any PPT chain-graph adversary with read access to the Solana ledger,
+\[
+  \operatorname{Adv}^{\mathrm{link}}_{\mathsf{Layer 1\text{--}4}}(\mathcal{A}) \leq
+  \frac{1}{|\mathcal{F}|} +
+  \operatorname{Adv}^{\mathrm{IP\text{-}deanon}}_{\mathrm{network}}(\mathcal{B}_5) +
+  \operatorname{Adv}^{\mathrm{timing}}_{\mathrm{slot}}(\mathcal{B}_6) +
+  \mathit{negl}(\lambda).
+\]
+\end{theorem}
+
+The $1/|\mathcal{F}|$ term comes from the on-chain sponsor pool's commingling: every payout to an ephemeral keypair is statistically uniform over the deposit-wallet set, provided deposits arrive faster than payouts. The two side-channel terms ($\mathcal{B}_5$ at the network layer and $\mathcal{B}_6$ at the per-slot timing layer) are \emph{not} closed by Layers 1--4 and require independent countermeasures: Tor or I2P circuits for $\mathcal{B}_5$, randomised submission delays plus Jito bundle ordering for $\mathcal{B}_6$. We document this explicitly so the privacy claim is not over-sold.
+
+On devnet, with $|\mathcal{F}| = 5$ historical deposit wallets, the direct-link bound is about $20\%$. Under mainnet conditions with $|\mathcal{F}| \geq 100$ and healthy deposit cadence, the bound drops below $1\%$. Empirical witness: Withdraw transaction \texttt{3UVkfK5tt671FDJ\ldots} on 2026-05-22 had a signer (\texttt{B3mFCD2q\ldots}) that was demonstrably an ephemeral keypair funded through a \texttt{SponsorPayout}, with no on-chain edge to the recipient's funding wallet.
+
+\subsection{What we leak, on purpose}
+
+The per-coin denomination is the only quantity we leak on chain. A user spending exactly one coin of denomination $D$ reveals $D$. This is a deliberate trade-off against the cost of the Token-2022 ConfidentialMint integration. Anonymity sets at TARDUS are therefore per-denomination: a 0.001\,SOL coin sits in an anonymity set with all other unspent 0.001\,SOL coins, not with all unspent coins of any denomination. We expect operators to publish only a small set of common denominations (we use four on devnet); the per-denomination set then grows proportionally to traffic.

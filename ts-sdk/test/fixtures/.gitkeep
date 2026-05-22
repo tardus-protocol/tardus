@@ -1,0 +1,4 @@
+# Fixtures populated dynamically by CI workflow `cross-language-compat.yml`.
+# Local developers can regenerate via:
+#   cargo run -p tardus-wallet --example cross_language_vectors --release \
+#     > ts-sdk/test/fixtures/rust-vectors.json

@@ -1,0 +1,96 @@
+# cargo-deny configuration for TARDUS workspace.
+#
+# Checks four things on every CI run:
+#   advisories — RustSec CVE feed
+#   licenses   — SPDX allowlist (deny GPL/AGPL contamination of a
+#                proprietary workspace)
+#   bans       — duplicate crate versions, banned crates
+#   sources    — registries and git sources
+
+[graph]
+all-features = true
+
+# ──────────────────────────────────────────────────────────
+[advisories]
+# Mirrors .cargo/audit.toml ignore set; documented in that file.
+ignore = [
+  "RUSTSEC-2024-0344",
+  "RUSTSEC-2022-0093",
+  "RUSTSEC-2026-0098",
+  "RUSTSEC-2026-0099",
+  "RUSTSEC-2026-0104",
+  # Unmaintained warnings (informational, not security-critical).
+  # Each transitively via Solana SDK 2.3.x; remove on SDK upgrade.
+  "RUSTSEC-2024-0375", # atty unmaintained
+  "RUSTSEC-2024-0388", # derivative unmaintained
+  "RUSTSEC-2024-0436", # paste unmaintained
+  "RUSTSEC-2025-0141", # bincode unmaintained
+  "RUSTSEC-2025-0161", # libsecp256k1 unmaintained
+  "RUSTSEC-2025-0134", # number_prefix unmaintained
+  "RUSTSEC-2025-0119", # rustls-pemfile unmaintained
+]
+
+# ──────────────────────────────────────────────────────────
+[licenses]
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "CC0-1.0",
+  "MPL-2.0",
+  "Zlib",
+  "OpenSSL",
+  "0BSD",
+  # Permissive licenses pulled by egui/eframe transitive deps:
+  "BSL-1.0",        # clipboard-win → arboard → egui-winit
+  "OFL-1.1",        # epaint_default_fonts (Ubuntu fonts); also IBM Plex
+  "LicenseRef-UFL-1.0",  # Ubuntu Font License 1.0 — egui default fonts
+  "CDLA-Permissive-2.0", # webpki-root-certs (Linux Foundation permissive)
+]
+confidence-threshold = 0.8
+
+# TARDUS workspace itself is TARDUS-PROPRIETARY-1.0 (not SPDX). Crates
+# with publish = false in Cargo.toml are skipped for license checking.
+private = { ignore = true }
+
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [
+  { path = "LICENSE", hash = 0xbd0eed23 },
+]
+
+# ──────────────────────────────────────────────────────────
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+highlight = "all"
+# Solana SDK 2.3.x brings duplicate crate versions for curve25519-dalek,
+# ed25519-dalek, rand, getrandom — known, accepted until Solana SDK
+# consolidates.
+allow = []
+deny = []
+skip = [
+  { name = "curve25519-dalek" },
+  { name = "ed25519-dalek" },
+  { name = "rand" },
+  { name = "rand_core" },
+  { name = "rand_chacha" },
+  { name = "getrandom" },
+  { name = "hashbrown" },
+  { name = "syn" },
+  { name = "windows-sys" },
+  { name = "windows-targets" },
+  { name = "bitflags" },
+]
+
+# ──────────────────────────────────────────────────────────
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

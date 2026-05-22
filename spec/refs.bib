@@ -1,0 +1,260 @@
+% TARDUS Protocol Specification — Bibliography
+% Phase 0, version 0.1 — 2026-05-20
+
+% =========================================================
+% Core historical lineage (Chaum line, 1982-2020)
+% =========================================================
+
+@inproceedings{chaum1982,
+  author    = {Chaum, David},
+  title     = {Blind Signatures for Untraceable Payments},
+  booktitle = {Advances in Cryptology --- {CRYPTO} '82},
+  pages     = {199--203},
+  year      = {1983},
+  publisher = {Plenum Press},
+  address   = {New York}
+}
+
+@inproceedings{chaum-fiat-naor1988,
+  author    = {Chaum, David and Fiat, Amos and Naor, Moni},
+  title     = {Untraceable Electronic Cash},
+  booktitle = {Advances in Cryptology --- {CRYPTO} '88},
+  editor    = {Goldwasser, Shafi},
+  series    = {LNCS},
+  volume    = {403},
+  pages     = {319--327},
+  year      = {1990},
+  publisher = {Springer}
+}
+
+@phdthesis{brands1993,
+  author = {Brands, Stefan A.},
+  title  = {An Efficient Off-Line Electronic Cash System Based on the Representation Problem},
+  school = {Centrum voor Wiskunde en Informatica (CWI), Eindhoven},
+  year   = {1993},
+  type   = {Technical Report CS-R9323}
+}
+
+@inproceedings{okamoto1995,
+  author    = {Okamoto, Tatsuaki},
+  title     = {An Efficient Divisible Electronic Cash Scheme},
+  booktitle = {Advances in Cryptology --- {CRYPTO} '95},
+  editor    = {Coppersmith, Don},
+  series    = {LNCS},
+  volume    = {963},
+  pages     = {438--451},
+  year      = {1995},
+  publisher = {Springer}
+}
+
+@inproceedings{pointcheval-stern1996,
+  author    = {Pointcheval, David and Stern, Jacques},
+  title     = {Provably Secure Blind Signature Schemes},
+  booktitle = {Advances in Cryptology --- {ASIACRYPT} '96},
+  editor    = {Kim, Kwangjo and Matsumoto, Tsutomu},
+  series    = {LNCS},
+  volume    = {1163},
+  pages     = {252--265},
+  year      = {1996},
+  publisher = {Springer}
+}
+
+@inproceedings{stinson-strobl2001,
+  author    = {Stinson, Douglas R. and Strobl, Reto},
+  title     = {Provably Secure Distributed {Schnorr} Signatures and a $(t, n)$ Threshold Scheme for Implicit Certificates},
+  booktitle = {Information Security and Privacy --- {ACISP} 2001},
+  editor    = {Varadharajan, Vijay and Mu, Yi},
+  series    = {LNCS},
+  volume    = {2119},
+  pages     = {417--434},
+  year      = {2001},
+  publisher = {Springer}
+}
+
+@inproceedings{stadler-piveteau-camenisch1995,
+  author    = {Stadler, Markus and Piveteau, Jean-Marc and Camenisch, Jan},
+  title     = {Fair Blind Signatures},
+  booktitle = {Advances in Cryptology --- {EUROCRYPT} '95},
+  editor    = {Guillou, Louis C. and Quisquater, Jean-Jacques},
+  series    = {LNCS},
+  volume    = {921},
+  pages     = {209--219},
+  year      = {1995},
+  publisher = {Springer}
+}
+
+@inproceedings{camenisch-hohenberger-lysyanskaya2005,
+  author    = {Camenisch, Jan and Hohenberger, Susan and Lysyanskaya, Anna},
+  title     = {Compact E-Cash},
+  booktitle = {Advances in Cryptology --- {EUROCRYPT} 2005},
+  editor    = {Cramer, Ronald},
+  series    = {LNCS},
+  volume    = {3494},
+  pages     = {302--321},
+  year      = {2005},
+  publisher = {Springer}
+}
+
+% =========================================================
+% Threshold cryptography
+% =========================================================
+
+@article{schnorr1991,
+  author  = {Schnorr, Claus-Peter},
+  title   = {Efficient Signature Generation by Smart Cards},
+  journal = {Journal of Cryptology},
+  volume  = {4},
+  number  = {3},
+  pages   = {161--174},
+  year    = {1991}
+}
+
+@inproceedings{pedersen1991,
+  author    = {Pedersen, Torben Pryds},
+  title     = {Non-Interactive and Information-Theoretic Secure Verifiable Secret Sharing},
+  booktitle = {Advances in Cryptology --- {CRYPTO} '91},
+  editor    = {Feigenbaum, Joan},
+  series    = {LNCS},
+  volume    = {576},
+  pages     = {129--140},
+  year      = {1992},
+  publisher = {Springer}
+}
+
+@inproceedings{gennaro-jarecki-krawczyk-rabin1999,
+  author    = {Gennaro, Rosario and Jarecki, Stanis{\l}aw and Krawczyk, Hugo and Rabin, Tal},
+  title     = {Secure Distributed Key Generation for Discrete-Log Based Cryptosystems},
+  booktitle = {Advances in Cryptology --- {EUROCRYPT} '99},
+  editor    = {Stern, Jacques},
+  series    = {LNCS},
+  volume    = {1592},
+  pages     = {295--310},
+  year      = {1999},
+  publisher = {Springer}
+}
+
+@inproceedings{komlo-goldberg2020,
+  author    = {Komlo, Chelsea and Goldberg, Ian},
+  title     = {{FROST}: Flexible Round-Optimized {Schnorr} Threshold Signatures},
+  booktitle = {Selected Areas in Cryptography --- {SAC} 2020},
+  year      = {2021},
+  publisher = {Springer},
+  series    = {LNCS},
+  volume    = {12804}
+}
+
+% =========================================================
+% Modern production systems and lessons
+% =========================================================
+
+@phdthesis{dold2019,
+  author = {Dold, Florian},
+  title  = {The {GNU} {Taler} System: Practical and Provably Secure Electronic Payments},
+  school = {Universit{\'e} de Rennes 1},
+  year   = {2019},
+  note   = {HAL-Inria tel-02138082},
+  url    = {https://theses.hal.science/tel-02138082}
+}
+
+@misc{taler-dd62,
+  author       = {{{GNU} Taler Project}},
+  title        = {{DD} 62: {PQ} Refresh Protocol},
+  howpublished = {Design Document},
+  year         = {2024},
+  url          = {https://docs.taler.net/design-documents/062-pq-refresh.html}
+}
+
+@misc{taler-exchange-manual,
+  author       = {{{GNU} Taler Project}},
+  title        = {{GNU} Taler Exchange Operator Manual},
+  year         = {2025},
+  url          = {https://docs.taler.net/taler-exchange-manual.html}
+}
+
+@misc{conduition2026,
+  author       = {{Conduition}},
+  title        = {Vulnerabilities in the {Cashu} {ECash} Protocol},
+  month        = jan,
+  year         = {2026},
+  url          = {https://conduition.io/code/cashu-disclosure/}
+}
+
+@misc{cashu-nuts,
+  author       = {{Cashu BTC Project}},
+  title        = {Cashu {NUT} Specifications},
+  year         = {2024},
+  url          = {https://cashubtc.github.io/nuts/}
+}
+
+% =========================================================
+% Solana ecosystem
+% =========================================================
+
+@misc{token2022,
+  author       = {{Solana Labs}},
+  title        = {{SPL} Token-2022 Confidential Transfer Extension},
+  year         = {2024},
+  url          = {https://spl.solana.com/token-2022}
+}
+
+@misc{light-protocol,
+  author       = {{Light Protocol}},
+  title        = {{ZK} Compression: Whitepaper and Specification},
+  year         = {2024},
+  url          = {https://www.lightprotocol.com}
+}
+
+% =========================================================
+% Standards
+% =========================================================
+
+@techreport{fips140-2,
+  author      = {{National Institute of Standards and Technology}},
+  title       = {{FIPS} 140-2: Security Requirements for Cryptographic Modules},
+  institution = {{NIST}},
+  number      = {{FIPS PUB} 140-2},
+  year        = {2001}
+}
+
+@techreport{nist-sp800-185,
+  author      = {{National Institute of Standards and Technology}},
+  title       = {{SHA-3} Derived Functions: {cSHAKE}, {KMAC}, {TupleHash}, and {ParallelHash}},
+  institution = {{NIST}},
+  number      = {{SP} 800-185},
+  year        = {2016}
+}
+
+% =========================================================
+% Added in v0.1 Phase 0 §7 (security theorems)
+% =========================================================
+
+@inproceedings{nick-ruffing-seurin2020,
+  author    = {Nick, Jonas and Ruffing, Tim and Seurin, Yannick},
+  title     = {{MuSig2}: Simple Two-Round {Schnorr} Multi-Signatures},
+  booktitle = {Advances in Cryptology --- {CRYPTO} 2021},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {12825},
+  pages     = {189--221},
+  publisher = {Springer},
+  year      = {2021}
+}
+
+@inproceedings{easycrypt2013,
+  author    = {Barthe, Gilles and Gr{\'e}goire, Benjamin and B{\'e}guelin, Santiago Zanella},
+  title     = {{EasyCrypt}: A Tutorial},
+  booktitle = {Foundations of Security Analysis and Design VII},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {8604},
+  pages     = {146--166},
+  publisher = {Springer},
+  year      = {2014}
+}
+
+% Added in v1.5 Phase 1 spec revision (§6 wallet update).
+@misc{bip39,
+  author       = {Palatinus, Marek and Rusnak, Pavol and Voisine, Aaron and Bowe, Sean},
+  title        = {{BIP-39}: Mnemonic Code for Generating Deterministic Keys},
+  year         = {2013},
+  howpublished = {Bitcoin Improvement Proposal},
+  note         = {\url{https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki}}
+}
