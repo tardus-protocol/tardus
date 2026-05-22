@@ -63,6 +63,19 @@ struct Args {
     /// Requires `--tls-cert` + `--tls-key`.
     #[arg(long)]
     mtls_ca_cert: Option<PathBuf>,
+    /// Solana JSON-RPC endpoint used to verify on-chain nullifier
+    /// finalization before issuing partial signatures in refresh_round5.
+    /// Example: `https://api.mainnet-beta.solana.com`
+    /// Required in production (together with --nullifier-tree-pda-hex).
+    /// If unset, the nullifier guard is disabled (dev/test mode only).
+    #[arg(long, env = "TARDUS_VALIDATOR_SOLANA_RPC_URL")]
+    solana_rpc_url: Option<String>,
+    /// Hex-encoded 32-byte address of the nullifier-tree PDA account.
+    /// Derived from seeds ["tardus", "nullifier-tree"] and the deployed
+    /// program ID via find_program_address.
+    /// Required when --solana-rpc-url is set.
+    #[arg(long, env = "TARDUS_VALIDATOR_NULLIFIER_TREE_PDA")]
+    nullifier_tree_pda_hex: Option<String>,
 }
 
 fn parse_seed(hex_str: &str) -> Result<[u8; 32]> {
@@ -98,12 +111,40 @@ async fn main() -> Result<()> {
         .as_deref()
         .map(parse_seed)
         .transpose()?;
+    // Parse optional nullifier-tree PDA address.
+    let nullifier_tree_pda = args
+        .nullifier_tree_pda_hex
+        .as_deref()
+        .map(|hex_str| -> anyhow::Result<[u8; 32]> {
+            let bytes = hex::decode(hex_str).context("nullifier_tree_pda_hex not valid hex")?;
+            if bytes.len() != 32 {
+                return Err(anyhow!(
+                    "nullifier_tree_pda_hex: expected 32 bytes, got {}",
+                    bytes.len()
+                ));
+            }
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&bytes);
+            Ok(out)
+        })
+        .transpose()?;
+
+    // Enforce: if solana_rpc_url is set, nullifier_tree_pda must also be set.
+    if args.solana_rpc_url.is_some() && nullifier_tree_pda.is_none() {
+        return Err(anyhow!(
+            "--nullifier-tree-pda-hex (or TARDUS_VALIDATOR_NULLIFIER_TREE_PDA) \
+             must be set when --solana-rpc-url is configured"
+        ));
+    }
+
     let config = ValidatorConfig {
         data_dir: args.data_dir.clone(),
         bind_addr: args.bind,
         operator_name: args.operator,
         master_seed,
         admin_token: args.admin_token,
+        solana_rpc_url: args.solana_rpc_url,
+        nullifier_tree_pda,
     };
     let state = new_shared_state();
 

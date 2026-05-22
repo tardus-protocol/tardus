@@ -448,12 +448,148 @@ pub struct RefreshRound5Resp {
     pub s_partial_hex: String,
 }
 
+/// Verify that the nullifier for `coin_pubkey` is present in the on-chain
+/// `NullifierSet` PDA at `nullifier_tree_pda`.
+///
+/// Makes a `getAccountInfo` JSON-RPC call to `rpc_url` with `commitment:
+/// finalized`, deserialises the account data as a Borsh-encoded
+/// `NullifierSet` (u32 count + N×32-byte leaves), and checks for the
+/// computed nullifier `SHA-256("TARDUS-nullifier-v1" || coin_pubkey)`.
+///
+/// Returns `Ok(())` if the nullifier is confirmed on-chain.
+/// Returns `Err(String)` with a descriptive message otherwise.
+///
+/// # Security
+/// This guard closes the state-desynchronisation window described in the
+/// TARDUS threat model: without it a client could run the off-chain
+/// refresh rounds repeatedly with the same coin without ever broadcasting
+/// the on-chain `Refresh` transaction, minting unlimited coins.
+pub async fn verify_nullifier_finalized(
+    rpc_url: &str,
+    nullifier_tree_pda: &[u8; 32],
+    coin_pubkey: &[u8; 32],
+) -> Result<(), String> {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+
+    // 1. Compute nullifier: SHA-256("TARDUS-nullifier-v1" || coin_pubkey)
+    let nullifier = {
+        let mut h = Sha256::new();
+        h.update(b"TARDUS-nullifier-v1");
+        h.update(coin_pubkey);
+        let out = h.finalize();
+        let mut bytes = [0u8; 32];
+        bytes.copy_from_slice(&out);
+        bytes
+    };
+
+    // 2. Encode PDA as base58 for the Solana JSON-RPC call.
+    let pda_b58 = bs58::encode(nullifier_tree_pda).into_string();
+
+    // 3. Build and send getAccountInfo request.
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getAccountInfo",
+        "params": [
+            pda_b58,
+            { "encoding": "base64", "commitment": "finalized" }
+        ]
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(rpc_url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Solana RPC request failed: {e}"))?;
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Solana RPC response parse failed: {e}"))?;
+
+    // 4. Extract account data from the response.
+    //    If value is null the PDA account does not exist yet.
+    let value = json.pointer("/result/value");
+    let data_b64 = match value {
+        None => {
+            return Err(format!(
+                "unexpected Solana RPC response shape: {json}"
+            ));
+        }
+        Some(v) if v.is_null() => {
+            return Err(
+                "nullifier-tree PDA account does not exist on-chain; \
+                 the Refresh transaction has not been broadcast"
+                    .to_string(),
+            );
+        }
+        Some(v) => v
+            .pointer("/data/0")
+            .and_then(|d| d.as_str())
+            .ok_or_else(|| format!("unexpected account data format in RPC response: {v}"))?
+            .to_owned(),
+    };
+
+    // 5. Base64-decode the account data.
+    let account_data = base64::engine::general_purpose::STANDARD
+        .decode(&data_b64)
+        .map_err(|e| format!("base64 decode of account data failed: {e}"))?;
+
+    // 6. Deserialise the NullifierSet.
+    //    Borsh layout: u32 (LE) count, then count × 32-byte leaves.
+    //    NullifierSet has a single field `leaves: BTreeSet<[u8;32]>`,
+    //    so the struct encoding is exactly the BTreeSet encoding.
+    if account_data.len() < 4 {
+        return Err(format!(
+            "nullifier-tree account data too short: {} bytes",
+            account_data.len()
+        ));
+    }
+    let count = u32::from_le_bytes([
+        account_data[0],
+        account_data[1],
+        account_data[2],
+        account_data[3],
+    ]) as usize;
+    let expected_len = 4 + count * 32;
+    if account_data.len() < expected_len {
+        return Err(format!(
+            "nullifier-tree account data truncated: expected {expected_len} bytes, \
+             got {}",
+            account_data.len()
+        ));
+    }
+
+    // 7. Binary-search the sorted leaf array for our nullifier.
+    //    BTreeSet is serialised in ascending order by Borsh, so we can
+    //    use a standard binary search.
+    let leaves_bytes = &account_data[4..4 + count * 32];
+    let found = leaves_bytes
+        .chunks_exact(32)
+        .any(|chunk| chunk == nullifier);
+
+    if found {
+        Ok(())
+    } else {
+        Err(format!(
+            "nullifier {} not found in on-chain NullifierSet ({count} entries); \
+             the Refresh transaction has not been finalized",
+            hex::encode(nullifier)
+        ))
+    }
+}
+
 /// `POST /refresh/round5` — consume the previously-stored Round-1
 /// state and produce this validator's partial signature for γ*.
 ///
 /// # Errors
 /// - 400 if any hex field is malformed, `kappa`/`gamma_star` bounds wrong,
 ///   or `validator_refresh_round5` rejects.
+/// - 403 if the on-chain nullifier guard is enabled and the surrendered
+///   coin's nullifier is not yet finalized in the `NullifierSet` PDA.
 /// - 503 if validator share not loaded.
 /// - 404 if no in-flight session.
 /// - 500 on impossible share-decode failure.
@@ -482,6 +618,37 @@ pub async fn refresh_round5(
     let melted_coin_pubkey = decode_hex32(&req.melted_coin_pubkey_hex, "melted_coin_pubkey_hex")?;
     let melted_coin_signature =
         Signature::from_bytes(&decode_hex64(&req.melted_coin_signature_hex, "melted_coin_signature_hex")?);
+
+    // ── On-chain nullifier guard ──────────────────────────────────────────
+    // Before issuing any partial signature, verify that the surrendered
+    // coin's nullifier has been finalized in the on-chain NullifierSet PDA.
+    // Without this check a client could run the off-chain refresh rounds
+    // repeatedly with the same coin (never broadcasting the Refresh tx),
+    // minting an unlimited supply of coins.
+    if let Some(rpc_url) = &app.config.solana_rpc_url {
+        // nullifier_tree_pda is guaranteed Some when solana_rpc_url is Some
+        // (enforced at startup in main.rs).
+        let pda = app.config.nullifier_tree_pda.ok_or_else(|| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "nullifier_tree_pda not configured (startup check should have caught this)",
+            )
+        })?;
+        verify_nullifier_finalized(rpc_url, &pda, &melted_coin_pubkey)
+            .await
+            .map_err(|msg| {
+                tracing::warn!(
+                    melted_coin_pubkey = %req.melted_coin_pubkey_hex,
+                    reason = %msg,
+                    "refresh_round5: nullifier not finalized on-chain, refusing to sign"
+                );
+                err(
+                    StatusCode::FORBIDDEN,
+                    format!("nullifier not finalized on-chain: {msg}"),
+                )
+            })?;
+    }
+    // ─────────────────────────────────────────────────────────────────────
 
     let share_bytes = {
         let s = app.state.read().await;

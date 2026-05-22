@@ -25,6 +25,22 @@ pub struct ValidatorConfig {
     /// Token required in the `X-Admin-Token` header for
     /// `/admin/*` endpoints. If `None`, admin endpoints return 403.
     pub admin_token: Option<String>,
+    /// Solana JSON-RPC endpoint (e.g. `https://api.mainnet-beta.solana.com`).
+    ///
+    /// When set, `refresh_round5` will verify that the surrendered coin's
+    /// nullifier is present in the on-chain `NullifierSet` PDA before
+    /// issuing a partial signature. This closes the state-desynchronisation
+    /// window that would otherwise allow a client to reuse the same coin
+    /// across multiple off-chain refresh sessions.
+    ///
+    /// `None` disables the guard (dev / test mode only).
+    pub solana_rpc_url: Option<String>,
+    /// 32-byte address of the nullifier-tree PDA account.
+    ///
+    /// Derived from seeds `["tardus", "nullifier-tree"]` and the deployed
+    /// program ID via `find_program_address`. Must be set whenever
+    /// `solana_rpc_url` is set.
+    pub nullifier_tree_pda: Option<[u8; 32]>,
 }
 
 /// Shared mutable state. Held inside an `Arc<RwLock<_>>` so it can be
