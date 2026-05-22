@@ -10,7 +10,7 @@ Tardus is an open-source, threshold blind-signature e-cash protocol built on Sol
 
 | Repository | Visibility | Description |
 |------------|-----------|-------------|
-| [`tardus`](https://github.com/tardus-org/tardus) | 🌐 Public | Core protocol, Rust crates, TypeScript SDK, web frontend, formal spec & proofs |
+| [`tardus`](https://github.com/tardus-protocol/tardus) | 🌐 Public | Core protocol, Rust crates, TypeScript SDK, web frontend, formal spec & proofs |
 | `tardus-infra` | 🔒 Private | Deployment runbooks, HSM configuration, operator guides |
 | `tardus-audit` | 🔒 Private | Security audit findings (public after audit completion) |
 
@@ -60,17 +60,17 @@ We actively seek review from specialists in:
 - **HSM & Key Management** — hardware security module integration
 - **TypeScript / Web Security** — client-side cryptography, XSS, CSP
 
-If you have expertise in any of these areas and want to contribute, open a [Cryptographic Review Request](https://github.com/tardus-org/tardus/issues/new?template=crypto_review.md) or email `security@tardus.dev`.
+If you have expertise in any of these areas and want to contribute, open a [Cryptographic Review Request](https://github.com/tardus-protocol/tardus/issues/new?template=crypto_review.md) or email `security@tardus.dev`.
 
 ---
 
 ## Security
 
 Found a vulnerability? **Do not open a public issue.**
-See [`SECURITY.md`](https://github.com/tardus-org/tardus/blob/main/SECURITY.md) for responsible disclosure.
+See [`SECURITY.md`](https://github.com/tardus-protocol/tardus/blob/main/SECURITY.md) for responsible disclosure.
 
 ---
 
 ## License
 
-[MIT](https://github.com/tardus-org/tardus/blob/main/LICENSE) — Tardus Organization
+[MIT](https://github.com/tardus-protocol/tardus/blob/main/LICENSE) — Tardus Organization

@@ -1,6 +1,6 @@
 # tardus-infra — Private Infrastructure Repository
 
-This document describes how to split the `deploy/` directory from this public monorepo into the private `tardus-org/tardus-infra` repository.
+This document describes how to split the `deploy/` directory from this public monorepo into the private `tardus-protocol/tardus-infra` repository.
 
 ## Why a Separate Private Repo?
 
@@ -18,7 +18,7 @@ None of this should be public before mainnet launch and security audit completio
 ## Repository Structure
 
 ```
-tardus-org/tardus-infra   (PRIVATE)
+tardus-protocol/tardus-infra   (PRIVATE)
 ├── deploy/
 │   ├── monitoring/
 │   │   └── health-probe.sh
@@ -46,19 +46,19 @@ tardus-org/tardus-infra   (PRIVATE)
 ### 1. Create the private repo
 
 ```bash
-gh repo create tardus-org/tardus-infra --private --description "Tardus infrastructure, runbooks, and deployment configuration"
+gh repo create tardus-protocol/tardus-infra --private --description "Tardus infrastructure, runbooks, and deployment configuration"
 ```
 
 ### 2. Extract deploy/ history (optional — preserves git blame)
 
 ```bash
 # In a fresh clone of this repo
-git clone https://github.com/tardus-org/tardus.git tardus-extract
+git clone https://github.com/tardus-protocol/tardus.git tardus-extract
 cd tardus-extract
 git filter-repo --path deploy/ --force
 
 # Push to new private repo
-git remote set-url origin https://github.com/tardus-org/tardus-infra.git
+git remote set-url origin https://github.com/tardus-protocol/tardus-infra.git
 git push origin main
 ```
 
@@ -82,10 +82,10 @@ cat > deploy/README.md << 'EOF'
 # Deployment & Infrastructure
 
 Deployment runbooks, systemd service files, and HSM configuration are maintained
-in the private repository: **tardus-org/tardus-infra**
+in the private repository: **tardus-protocol/tardus-infra**
 
 Access is restricted to operators and core maintainers.
-Contact @tardus-org/infra-reviewers for access.
+Contact @tardus-protocol/infra-reviewers for access.
 EOF
 git add deploy/README.md
 git commit -m "chore: replace deploy/ with pointer to tardus-infra private repo"
@@ -120,7 +120,7 @@ The infra repo can reference workflow artifacts from the public `tardus` repo vi
 # In tardus-infra CI
 - uses: actions/download-artifact@v4
   with:
-    repository: tardus-org/tardus
+    repository: tardus-protocol/tardus
     run-id: ${{ inputs.run_id }}
     github-token: ${{ secrets.CROSS_REPO_TOKEN }}
 ```
